@@ -1,4 +1,6 @@
-declare namespace Express {
+import 'express-serve-static-core';
+
+declare module 'express-serve-static-core' {
   interface Request {
     usuario?: {
       id?: number | string;
@@ -11,3 +13,5 @@ declare namespace Express {
     filtroVendedor?: number | string;
   }
 }
+
+export {};

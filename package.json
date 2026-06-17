@@ -6,7 +6,7 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/server.js",
-    "dev": "nodemon --watch . --ext ts --exec ts-node ./server.ts",
+    "dev": "nodemon --watch . --ext ts --exec ts-node --files ./server.ts",
     "migrate": "node dist/src/scripts/migrate.js",
     "seed": "node dist/src/scripts/seed.js"
   },

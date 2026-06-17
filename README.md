@@ -19,7 +19,7 @@ npm install
 Crie um arquivo `.env` na raiz com os campos abaixo:
 
 ```env
-PORT=3001
+PORT=8080
 NODE_ENV=development
 
 DB_HOST=localhost
