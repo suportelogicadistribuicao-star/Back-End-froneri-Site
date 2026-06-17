@@ -2,12 +2,13 @@
   "name": "erp-froneri-backend",
   "version": "1.0.0",
   "description": "Backend ERP Froneri - Broker Lógica",
-  "main": "server.js",
+  "main": "dist/server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "nodemon server.js",
-    "migrate": "node src/scripts/migrate.js",
-    "seed": "node src/scripts/seed.js"
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "nodemon --watch . --ext ts --exec ts-node ./server.ts",
+    "migrate": "node dist/src/scripts/migrate.js",
+    "seed": "node dist/src/scripts/seed.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
@@ -24,7 +25,16 @@
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
-    "nodemon": "^3.1.4"
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/multer": "^2.0.0",
+    "@types/node": "^24.0.4",
+    "@types/pg": "^8.15.6",
+    "nodemon": "^3.1.4",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.2"
   },
   "engines": {
     "node": ">=18.0.0"
