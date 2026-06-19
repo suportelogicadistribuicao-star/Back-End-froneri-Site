@@ -2,11 +2,7 @@ import { Router } from 'express';
 import fs from 'fs';
 import { authMiddleware, requireRole } from '../middleware/auth';
 import upload from '../config/multer';
-import {
-    importarRelatorioVendas,
-    importarBaseAtiva,
-    importarCadastros,
-} from '../services/importService';
+import { importarRelatorioVendas } from '../services/importService';
 import { query } from '../config/database';
 
 const router = Router();
@@ -33,52 +29,6 @@ router.post('/vendas', ...protegido, upload.single('arquivo'), async (req, res) 
         res.status(500).json({ erro: `Erro na importação: ${err.message}` });
     } finally {
         // Remover arquivo temporário após processamento
-        if (req.file?.path && fs.existsSync(req.file.path)) {
-            fs.unlinkSync(req.file.path);
-        }
-    }
-});
-
-/**
- * POST /api/import/base-ativa
- * Importa Base_Froneri_Ativa_Roteirizações (.xlsx)
- */
-router.post('/base-ativa', ...protegido, upload.single('arquivo'), async (req, res) => {
-    if (!req.file) return res.status(400).json({ erro: 'Nenhum arquivo enviado.' });
-
-    try {
-        const resultado = await importarBaseAtiva(req.file.path, req.usuario.id);
-        res.json({
-            mensagem:   'Base Ativa importada com sucesso.',
-            importacaoId: resultado.logId,
-            contadores:   resultado.contadores,
-        });
-    } catch (err) {
-        res.status(500).json({ erro: `Erro na importação: ${err.message}` });
-    } finally {
-        if (req.file?.path && fs.existsSync(req.file.path)) {
-            fs.unlinkSync(req.file.path);
-        }
-    }
-});
-
-/**
- * POST /api/import/cadastros
- * Importa CADASTROS_FRONERI (.xlsx)
- */
-router.post('/cadastros', ...protegido, upload.single('arquivo'), async (req, res) => {
-    if (!req.file) return res.status(400).json({ erro: 'Nenhum arquivo enviado.' });
-
-    try {
-        const resultado = await importarCadastros(req.file.path, req.usuario.id);
-        res.json({
-            mensagem:   'Cadastros importados com sucesso.',
-            importacaoId: resultado.logId,
-            contadores:   resultado.contadores,
-        });
-    } catch (err) {
-        res.status(500).json({ erro: `Erro na importação: ${err.message}` });
-    } finally {
         if (req.file?.path && fs.existsSync(req.file.path)) {
             fs.unlinkSync(req.file.path);
         }
