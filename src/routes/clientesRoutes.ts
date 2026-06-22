@@ -56,7 +56,7 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
                 c.customer_number, c.customer_name, c.cnpj, c.city,
                 c.canal_cliente, c.segmentacao_cliente, c.nova_rup, c.status,
                 c.telefone, c.tem_contrato, c.qtd_conservadora,
-                c.payment_terms, c.credit_limit, c.address_line1, c.address_line2,
+                c.payment_terms, c.credit_limit, c.logradouro, c.bairro,
                 c.postal_code, c.hierarquia, c.codigo_setor,
                 v.nome AS vendedor_nome, v.setor AS vendedor_setor,
                 rot.dia_semana, rot.frequencia, rot.sequencia,
@@ -69,7 +69,7 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
                 END AS status_compra
             FROM clientes c
             LEFT JOIN vendedores v   ON v.id = c.vendedor_id
-            LEFT JOIN roteirizacao rot ON rot.sold = c.customer_number AND rot.ativa = TRUE
+            LEFT JOIN roteirizacao rot ON rot.customer_number = c.customer_number AND rot.ativa = TRUE
             ${whereClause}
             ORDER BY c.customer_name
             LIMIT $${p++} OFFSET $${p++}
@@ -98,7 +98,7 @@ router.get('/:id', authMiddleware, ownDataOnly, async (req, res) => {
                        rot.dia_semana, rot.frequencia, rot.sequencia, rot.visitas_semana
                 FROM clientes c
                 LEFT JOIN vendedores v ON v.id = c.vendedor_id
-                LEFT JOIN roteirizacao rot ON rot.sold = c.customer_number AND rot.ativa = TRUE
+                LEFT JOIN roteirizacao rot ON rot.customer_number = c.customer_number AND rot.ativa = TRUE
                 WHERE c.customer_number = $1
             `, [id]),
 
@@ -121,7 +121,7 @@ router.get('/:id', authMiddleware, ownDataOnly, async (req, res) => {
 
             query(`
                 SELECT * FROM pedidos_carteira
-                WHERE ship_to_number = $1
+                WHERE customer_number = $1
                 ORDER BY order_date DESC
                 LIMIT 20
             `, [id]),
@@ -176,7 +176,7 @@ router.get('/exportar/csv', authMiddleware, ownDataOnly, async (req, res) => {
                 rot.frequencia AS "Frequência"
             FROM clientes c
             LEFT JOIN vendedores v ON v.id = c.vendedor_id
-            LEFT JOIN roteirizacao rot ON rot.sold = c.customer_number AND rot.ativa = TRUE
+            LEFT JOIN roteirizacao rot ON rot.customer_number = c.customer_number AND rot.ativa = TRUE
             WHERE c.status = 'C'
             ${fvId ? 'AND c.vendedor_id = $1' : ''}
             ORDER BY v.nome, c.customer_name

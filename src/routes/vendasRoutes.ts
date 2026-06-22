@@ -55,7 +55,7 @@ router.get('/resumo', authMiddleware, ownDataOnly, async (req, res) => {
         if (ano)  { where.push(`ano = $${p++}`);         params.push(Number(ano)); }
 
         const wStr = where.length ? 'WHERE ' + where.join(' AND ') : '';
-        const grupoCol = agrupar === 'vendedor' ? 'vendedor_id, vendedor_descricao' : 'categoria';
+        const grupoCol = agrupar === 'vendedor' ? 'vendedor_id, vendedor_alias' : 'categoria';
 
         const rows = await query(`
             SELECT ${grupoCol},

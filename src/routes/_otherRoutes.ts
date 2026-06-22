@@ -81,13 +81,13 @@ rotRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
 
         const rows = await query(`
             SELECT
-                rot.id, rot.sold, rot.dia_semana, rot.frequencia, rot.sequencia,
+                rot.id, rot.customer_number, rot.dia_semana, rot.frequencia, rot.sequencia,
                 rot.visitas_semana, rot.bairro, rot.cidade,
                 c.customer_name, c.cnpj, c.canal_cliente, c.segmentacao_cliente,
-                c.telefone, c.nova_rup, c.address_line1,
+                c.telefone, c.nova_rup, c.logradouro,
                 v.nome AS vendedor_nome, v.setor, v.codigo_vendedor
             FROM roteirizacao rot
-            JOIN clientes c ON c.customer_number = rot.sold
+            JOIN clientes c ON c.customer_number = rot.customer_number
             LEFT JOIN vendedores v ON v.id = rot.vendedor_id
             WHERE ${where.join(' AND ')}
             ORDER BY rot.dia_semana, rot.sequencia, c.customer_name
@@ -111,12 +111,12 @@ rotRouter.get('/exportar/:vendedorId', authMiddleware, async (req, res) => {
             SELECT
                 rot.sequencia, rot.dia_semana, rot.frequencia,
                 c.customer_number AS sold, c.customer_name AS razao_social,
-                c.address_line1 AS endereco, c.address_line2 AS bairro, c.city AS cidade,
+                c.logradouro AS endereco, c.bairro AS bairro, c.city AS cidade,
                 c.telefone, c.canal_cliente, c.segmentacao_cliente, c.nova_rup,
                 c.qtd_conservadora AS conservadoras,
                 rot.visitas_semana AS visitas
             FROM roteirizacao rot
-            JOIN clientes c ON c.customer_number = rot.sold
+            JOIN clientes c ON c.customer_number = rot.customer_number
             WHERE rot.vendedor_id = $1 AND rot.ativa = TRUE ${extra}
             ORDER BY rot.dia_semana, rot.sequencia
         `, params);

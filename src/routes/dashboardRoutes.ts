@@ -52,7 +52,7 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
         // KPIs de Pedidos em Carteira
         const pedidosKPI = await query(`
             SELECT
-                COUNT(DISTINCT ship_to_number)   AS clientes_com_pedido,
+                COUNT(DISTINCT customer_number)   AS clientes_com_pedido,
                 SUM(extended_amount)             AS valor_carteira,
                 COUNT(*)                         AS total_pedidos
             FROM pedidos_carteira
