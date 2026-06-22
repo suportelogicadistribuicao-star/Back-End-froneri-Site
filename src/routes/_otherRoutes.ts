@@ -139,6 +139,86 @@ rotRouter.get('/exportar/:vendedorId', authMiddleware, async (req, res) => {
     }
 });
 
+rotRouter.post('/', authMiddleware, async (req, res) => {
+    try {
+        const { customer_number, codigo_vendedor, dia_semana, frequencia } = req.body;
+
+        if (!customer_number || !codigo_vendedor || !dia_semana || !frequencia) {
+            return res.status(400).json({ erro: 'Campos obrigatórios: customer_number, codigo_vendedor, dia_semana, frequencia.' });
+        }
+
+        const vendedor = await query(
+            'SELECT id FROM vendedores WHERE codigo_vendedor = $1',
+            [codigo_vendedor]
+        );
+        if (vendedor.rows.length === 0) {
+            return res.status(404).json({ erro: 'Vendedor não encontrado.' });
+        }
+        const vendedor_id = vendedor.rows[0].id;
+
+        // Desativa roteirização ativa anterior do mesmo cliente
+        await query(
+            'UPDATE roteirizacao SET ativa = FALSE WHERE customer_number = $1 AND ativa = TRUE',
+            [customer_number]
+        );
+
+        const result = await query(`
+            INSERT INTO roteirizacao (customer_number, vendedor_id, dia_semana, frequencia, ativa)
+            VALUES ($1, $2, $3, $4, TRUE)
+            RETURNING id
+        `, [customer_number, vendedor_id, dia_semana, frequencia]);
+
+        res.status(201).json({ mensagem: 'Roteirização criada.', id: result.rows[0].id });
+    } catch (err) {
+        console.error('[roteirizacao/post]', err);
+        res.status(500).json({ erro: 'Erro ao criar roteirização.' });
+    }
+});
+
+rotRouter.put('/:id', authMiddleware, async (req, res) => {
+    try {
+        const id = req.params.id;
+        const { customer_number, codigo_vendedor, dia_semana, frequencia } = req.body;
+
+        let vendedor_id: number | undefined;
+        if (codigo_vendedor) {
+            const vendedor = await query(
+                'SELECT id FROM vendedores WHERE codigo_vendedor = $1',
+                [codigo_vendedor]
+            );
+            if (vendedor.rows.length === 0) {
+                return res.status(404).json({ erro: 'Vendedor não encontrado.' });
+            }
+            vendedor_id = vendedor.rows[0].id;
+        }
+
+        await query(`
+            UPDATE roteirizacao SET
+                customer_number = COALESCE($1, customer_number),
+                vendedor_id     = COALESCE($2, vendedor_id),
+                dia_semana      = COALESCE($3, dia_semana),
+                frequencia      = COALESCE($4, frequencia)
+            WHERE id = $5
+        `, [customer_number ?? null, vendedor_id ?? null, dia_semana ?? null, frequencia ?? null, id]);
+
+        res.json({ mensagem: 'Roteirização atualizada.' });
+    } catch (err) {
+        console.error('[roteirizacao/put]', err);
+        res.status(500).json({ erro: 'Erro ao atualizar roteirização.' });
+    }
+});
+
+rotRouter.delete('/:id', authMiddleware, async (req, res) => {
+    try {
+        const id = req.params.id;
+        await query('UPDATE roteirizacao SET ativa = FALSE WHERE id = $1', [id]);
+        res.json({ mensagem: 'Roteirização removida.' });
+    } catch (err) {
+        console.error('[roteirizacao/delete]', err);
+        res.status(500).json({ erro: 'Erro ao remover roteirização.' });
+    }
+});
+
 // ─── cadastrosRoutes.js ───────────────────────────────────────────────────────
 const cadRouter = express.Router();
 
