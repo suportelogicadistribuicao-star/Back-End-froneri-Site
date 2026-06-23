@@ -4,17 +4,30 @@ const express_1 = require("express");
 const database_1 = require("../config/database");
 const auth_1 = require("../middleware/auth");
 const router = (0, express_1.Router)();
-// GET /api/dashboard
-// Retorna todos os KPIs consolidados do mês atual
+// GET /api/dashboard?mes=6&ano=2026&canal=OOH&segmentacao=A
 router.get('/', auth_1.authMiddleware, auth_1.ownDataOnly, async (req, res) => {
     try {
-        const mesAtual = new Date().getMonth() + 1;
-        const anoAtual = new Date().getFullYear();
+        const now = new Date();
+        const mes = Number(req.query.mes) || now.getMonth() + 1;
+        const ano = Number(req.query.ano) || now.getFullYear();
+        const canal = req.query.canal || null;
+        const segmentacao = req.query.segmentacao || null;
         const filtroVendedor = req.filtroVendedor;
-        const params = filtroVendedor
-            ? [mesAtual, anoAtual, filtroVendedor]
-            : [mesAtual, anoAtual];
-        const vendedorClause = filtroVendedor ? 'AND vendedor_id = $3' : '';
+        // Parâmetros e cláusula WHERE reutilizados em todas as queries de vendas/ruptura/pedidos
+        const p = [mes, ano];
+        let vendaWhere = 'WHERE mes_numero = $1 AND ano = $2';
+        if (filtroVendedor) {
+            p.push(filtroVendedor);
+            vendaWhere += ` AND vendedor_id = $${p.length}`;
+        }
+        if (canal) {
+            p.push(canal);
+            vendaWhere += ` AND canal_cliente = $${p.length}`;
+        }
+        if (segmentacao) {
+            p.push(segmentacao);
+            vendaWhere += ` AND segmentacao_cliente = $${p.length}`;
+        }
         // KPIs de Vendas
         const vendasKPI = await (0, database_1.query)(`
             SELECT
@@ -24,44 +37,56 @@ router.get('/', auth_1.authMiddleware, auth_1.ownDataOnly, async (req, res) => {
                 SUM(soma_caixas)                   AS total_caixas,
                 SUM(soma_litros)                   AS total_litros
             FROM vendas
-            WHERE mes_numero = $1 AND ano = $2 ${vendedorClause}
-        `, params);
-        // KPIs de Ruptura
+            ${vendaWhere}
+        `, p);
+        // KPIs de Ruptura (ruptura não tem canal/segmentacao, usa só mes/ano/vendedor)
+        const rupturaParams = [mes, ano];
+        let rupturaWhere = 'WHERE mes_numero = $1 AND ano = $2';
+        if (filtroVendedor) {
+            rupturaParams.push(filtroVendedor);
+            rupturaWhere += ` AND vendedor_id = $${rupturaParams.length}`;
+        }
         const rupturaKPI = await (0, database_1.query)(`
             SELECT COUNT(DISTINCT customer_number) AS total_ruptura
             FROM ruptura
-            WHERE mes_numero = $1 AND ano = $2 ${vendedorClause}
-        `, params);
-        // KPIs de Clientes Ativos
+            ${rupturaWhere}
+        `, rupturaParams);
+        // KPIs de Clientes Ativos (não filtra por mes/ano — base atual)
         const clientesKPI = await (0, database_1.query)(`
             SELECT
                 COUNT(*) AS total_ativos,
-                COUNT(CASE WHEN nova_rup = 'C/ Compra'   THEN 1 END) AS com_compra,
+                COUNT(CASE WHEN nova_rup = 'C/ Compra'    THEN 1 END) AS com_compra,
                 COUNT(CASE WHEN nova_rup = 'Cliente Novo' THEN 1 END) AS novos,
                 COUNT(CASE WHEN nova_rup LIKE '%6 Meses%' THEN 1 END) AS criticos,
-                COUNT(CASE WHEN tem_contrato = TRUE       THEN 1 END) AS com_contrato
+                COUNT(CASE WHEN tem_contrato = TRUE        THEN 1 END) AS com_contrato
             FROM clientes
             WHERE status = 'C'
             ${filtroVendedor ? 'AND vendedor_id = $1' : ''}
         `, filtroVendedor ? [filtroVendedor] : []);
         // KPIs de Pedidos em Carteira
+        const pedidosParams = [mes, ano];
+        let pedidosWhere = 'WHERE mes_numero = $1 AND ano = $2';
+        if (filtroVendedor) {
+            pedidosParams.push(filtroVendedor);
+            pedidosWhere += ` AND vendedor_id = $${pedidosParams.length}`;
+        }
         const pedidosKPI = await (0, database_1.query)(`
             SELECT
-                COUNT(DISTINCT ship_to_number)   AS clientes_com_pedido,
-                SUM(extended_amount)             AS valor_carteira,
-                COUNT(*)                         AS total_pedidos
+                COUNT(DISTINCT customer_number) AS clientes_com_pedido,
+                SUM(extended_amount)            AS valor_carteira,
+                COUNT(*)                        AS total_pedidos
             FROM pedidos_carteira
-            WHERE mes_numero = $1 AND ano = $2 ${vendedorClause}
-        `, params);
+            ${pedidosWhere}
+        `, pedidosParams);
         // Vendas por Categoria
         const vendasCategoria = await (0, database_1.query)(`
             SELECT categoria, SUM(valor_nf) AS valor, SUM(soma_caixas) AS caixas
             FROM vendas
-            WHERE mes_numero = $1 AND ano = $2 ${vendedorClause}
+            ${vendaWhere}
             GROUP BY categoria
             ORDER BY valor DESC
-        `, params);
-        // Vendas por Vendedor (se admin/gerente)
+        `, p);
+        // Vendas por Vendedor (somente para admin/gerente, sem filtro de canal/segmentacao)
         let vendasVendedor = [];
         if (!filtroVendedor) {
             const vv = await (0, database_1.query)(`
@@ -76,10 +101,10 @@ router.get('/', auth_1.authMiddleware, auth_1.ownDataOnly, async (req, res) => {
                 WHERE v.ativo = TRUE
                 GROUP BY v.id, v.nome, v.setor
                 ORDER BY valor_nf DESC
-            `, [mesAtual, anoAtual]);
+            `, [mes, ano]);
             vendasVendedor = vv.rows;
         }
-        // Devedores resumo
+        // Devedores resumo (não filtra por mes/ano — posição atual)
         const devedoresKPI = await (0, database_1.query)(`
             SELECT
                 COUNT(DISTINCT documento_cliente) AS total_devedores,
@@ -91,7 +116,7 @@ router.get('/', auth_1.authMiddleware, auth_1.ownDataOnly, async (req, res) => {
             )` : ''}
         `, filtroVendedor ? [filtroVendedor] : []);
         res.json({
-            periodo: { mes: mesAtual, ano: anoAtual },
+            periodo: { mes, ano },
             vendas: vendasKPI.rows[0],
             ruptura: rupturaKPI.rows[0],
             clientes: clientesKPI.rows[0],
@@ -106,30 +131,42 @@ router.get('/', auth_1.authMiddleware, auth_1.ownDataOnly, async (req, res) => {
         res.status(500).json({ erro: 'Erro ao carregar dashboard.' });
     }
 });
-// GET /api/dashboard/tendencia?meses=6
-// Evolução de vendas nos últimos N meses
+// GET /api/dashboard/tendencia?meses=6&ano=2026
 router.get('/tendencia', auth_1.authMiddleware, auth_1.ownDataOnly, async (req, res) => {
     try {
         const meses = Math.min(Number(req.query.meses || '6'), 12);
         const filtroVendedor = req.filtroVendedor;
+        // Calcula o ponto de corte correto usando aritmética de datas
+        // ex: junho/2026 - 6 meses = dezembro/2025 → anoCorte=2025, mesCorte=12
+        const now = new Date();
+        const refDate = new Date(now.getFullYear(), now.getMonth() - meses + 1, 1);
+        const mesCorte = refDate.getMonth() + 1;
+        const anoCorte = refDate.getFullYear();
+        const corte = anoCorte * 100 + mesCorte;
+        const p = [];
+        let extraWhere = '';
+        if (filtroVendedor) {
+            p.push(filtroVendedor);
+            extraWhere = `AND vendedor_id = $${p.length}`;
+        }
         const rows = await (0, database_1.query)(`
             SELECT
-                mes_numero, ano,
+                mes_numero,
+                ano,
                 mes_descricao,
-                SUM(valor_nf)   AS valor_nf,
-                SUM(soma_litros) AS litros,
+                SUM(valor_nf)                   AS valor_nf,
+                SUM(soma_litros)                AS litros,
                 COUNT(DISTINCT customer_number) AS clientes
             FROM vendas
-            WHERE (ano * 100 + mes_numero) >= (
-                SELECT (EXTRACT(YEAR FROM NOW())::int * 100) + EXTRACT(MONTH FROM NOW())::int - ${meses}
-            )
-            ${filtroVendedor ? 'AND vendedor_id = $1' : ''}
+            WHERE (ano * 100 + mes_numero) >= ${corte}
+            ${extraWhere}
             GROUP BY mes_numero, ano, mes_descricao
             ORDER BY ano, mes_numero
-        `, filtroVendedor ? [filtroVendedor] : []);
+        `, p);
         res.json(rows.rows);
     }
     catch (err) {
+        console.error('[dashboard/tendencia]', err);
         res.status(500).json({ erro: 'Erro ao carregar tendência.' });
     }
 });

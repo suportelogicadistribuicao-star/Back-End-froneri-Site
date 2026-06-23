@@ -13,34 +13,41 @@ exports.rupturaRouter = rupturaRouter;
 rupturaRouter.get('/', auth_1.authMiddleware, auth_1.ownDataOnly, async (req, res) => {
     try {
         const { mes, ano, vendedor_id, page = 1, limit = 50 } = req.query;
-        const mesUsar = Number(mes || new Date().getMonth() + 1);
-        const anoUsar = Number(ano || new Date().getFullYear());
         const fvId = req.filtroVendedor || vendedor_id;
-        const params = [mesUsar, anoUsar];
-        let p = 3;
-        const extra = [];
+        const where = [];
+        const params = [];
+        let p = 1;
+        if (mes) {
+            where.push(`r.mes_numero = $${p++}`);
+            params.push(Number(mes));
+        }
+        if (ano) {
+            where.push(`r.ano = $${p++}`);
+            params.push(Number(ano));
+        }
         if (fvId) {
-            extra.push(`r.vendedor_id = $${p++}`);
+            where.push(`r.vendedor_id = $${p++}`);
             params.push(fvId);
         }
-        const eStr = extra.length ? 'AND ' + extra.join(' AND ') : '';
+        const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
         const offset = (Number(page) - 1) * Number(limit);
         const rows = await (0, database_1.query)(`
             SELECT
                 r.id, r.customer_number, r.status_ruptura, r.justificativa,
                 r.pedido_em_carteira, r.observacao_ruptura,
-                r.observacao_cancelamento, r.mes_numero, r.ano,
+                r.observacao_cancelamento, r.data_solicitacao_cancelamento,
+                r.mes_numero, r.ano,
                 c.customer_name, c.city, c.canal_cliente, c.segmentacao_cliente,
                 c.telefone, c.nova_rup, c.cnpj,
                 v.nome AS vendedor_nome, v.setor
             FROM ruptura r
             JOIN clientes c ON c.customer_number = r.customer_number
             LEFT JOIN vendedores v ON v.id = r.vendedor_id
-            WHERE r.mes_numero = $1 AND r.ano = $2 ${eStr}
+            ${whereSql}
             ORDER BY c.segmentacao_cliente, c.customer_name
             LIMIT $${p++} OFFSET $${p++}
         `, [...params, Number(limit), offset]);
-        const total = await (0, database_1.query)(`SELECT COUNT(*) FROM ruptura r WHERE mes_numero = $1 AND ano = $2 ${eStr}`, [mesUsar, anoUsar, ...(fvId ? [fvId] : [])]);
+        const total = await (0, database_1.query)(`SELECT COUNT(*) FROM ruptura r ${whereSql}`, params);
         res.json({ total: Number(total.rows[0].count), pagina: Number(page), dados: rows.rows });
     }
     catch (err) {
@@ -49,16 +56,22 @@ rupturaRouter.get('/', auth_1.authMiddleware, auth_1.ownDataOnly, async (req, re
 });
 rupturaRouter.put('/:id', auth_1.authMiddleware, async (req, res) => {
     try {
-        const { justificativa, observacao_ruptura, observacao_cancelamento, status_ruptura } = req.body;
+        const { justificativa, observacao_ruptura, observacao_cancelamento, pedido_em_carteira, data_solicitacao_cancelamento, status_ruptura, } = req.body;
         await (0, database_1.query)(`
             UPDATE ruptura SET
-                justificativa = COALESCE($1, justificativa),
-                observacao_ruptura = COALESCE($2, observacao_ruptura),
-                observacao_cancelamento = COALESCE($3, observacao_cancelamento),
-                status_ruptura = COALESCE($4, status_ruptura),
-                updated_at = NOW()
-            WHERE id = $5
-        `, [justificativa, observacao_ruptura, observacao_cancelamento, status_ruptura, req.params.id]);
+                justificativa                 = COALESCE($1, justificativa),
+                observacao_ruptura            = COALESCE($2, observacao_ruptura),
+                observacao_cancelamento       = COALESCE($3, observacao_cancelamento),
+                pedido_em_carteira            = COALESCE($4, pedido_em_carteira),
+                data_solicitacao_cancelamento = COALESCE($5, data_solicitacao_cancelamento),
+                status_ruptura                = COALESCE($6, status_ruptura),
+                updated_at                    = NOW()
+            WHERE id = $7
+        `, [
+            justificativa, observacao_ruptura, observacao_cancelamento,
+            pedido_em_carteira, data_solicitacao_cancelamento, status_ruptura,
+            req.params.id,
+        ]);
         res.json({ mensagem: 'Ruptura atualizada.' });
     }
     catch (err) {
@@ -85,13 +98,13 @@ rotRouter.get('/', auth_1.authMiddleware, auth_1.ownDataOnly, async (req, res) =
         }
         const rows = await (0, database_1.query)(`
             SELECT
-                rot.id, rot.sold, rot.dia_semana, rot.frequencia, rot.sequencia,
+                rot.id, rot.customer_number, rot.dia_semana, rot.frequencia, rot.sequencia,
                 rot.visitas_semana, rot.bairro, rot.cidade,
                 c.customer_name, c.cnpj, c.canal_cliente, c.segmentacao_cliente,
-                c.telefone, c.nova_rup, c.address_line1,
+                c.telefone, c.nova_rup, c.logradouro,
                 v.nome AS vendedor_nome, v.setor, v.codigo_vendedor
             FROM roteirizacao rot
-            JOIN clientes c ON c.customer_number = rot.sold
+            JOIN clientes c ON c.customer_number = rot.customer_number
             LEFT JOIN vendedores v ON v.id = rot.vendedor_id
             WHERE ${where.join(' AND ')}
             ORDER BY rot.dia_semana, rot.sequencia, c.customer_name
@@ -114,12 +127,12 @@ rotRouter.get('/exportar/:vendedorId', auth_1.authMiddleware, async (req, res) =
             SELECT
                 rot.sequencia, rot.dia_semana, rot.frequencia,
                 c.customer_number AS sold, c.customer_name AS razao_social,
-                c.address_line1 AS endereco, c.address_line2 AS bairro, c.city AS cidade,
+                c.logradouro AS endereco, c.bairro AS bairro, c.city AS cidade,
                 c.telefone, c.canal_cliente, c.segmentacao_cliente, c.nova_rup,
                 c.qtd_conservadora AS conservadoras,
                 rot.visitas_semana AS visitas
             FROM roteirizacao rot
-            JOIN clientes c ON c.customer_number = rot.sold
+            JOIN clientes c ON c.customer_number = rot.customer_number
             WHERE rot.vendedor_id = $1 AND rot.ativa = TRUE ${extra}
             ORDER BY rot.dia_semana, rot.sequencia
         `, params);
@@ -136,6 +149,69 @@ rotRouter.get('/exportar/:vendedorId', auth_1.authMiddleware, async (req, res) =
     }
     catch (err) {
         res.status(500).json({ erro: 'Erro ao exportar roteiro.' });
+    }
+});
+rotRouter.post('/', auth_1.authMiddleware, async (req, res) => {
+    try {
+        const { customer_number, codigo_vendedor, dia_semana, frequencia } = req.body;
+        if (!customer_number || !codigo_vendedor || !dia_semana || !frequencia) {
+            return res.status(400).json({ erro: 'Campos obrigatórios: customer_number, codigo_vendedor, dia_semana, frequencia.' });
+        }
+        const vendedor = await (0, database_1.query)('SELECT id FROM vendedores WHERE codigo_vendedor = $1', [codigo_vendedor]);
+        if (vendedor.rows.length === 0) {
+            return res.status(404).json({ erro: 'Vendedor não encontrado.' });
+        }
+        const vendedor_id = vendedor.rows[0].id;
+        // Desativa roteirização ativa anterior do mesmo cliente
+        await (0, database_1.query)('UPDATE roteirizacao SET ativa = FALSE WHERE customer_number = $1 AND ativa = TRUE', [customer_number]);
+        const result = await (0, database_1.query)(`
+            INSERT INTO roteirizacao (customer_number, vendedor_id, dia_semana, frequencia, ativa)
+            VALUES ($1, $2, $3, $4, TRUE)
+            RETURNING id
+        `, [customer_number, vendedor_id, dia_semana, frequencia]);
+        res.status(201).json({ mensagem: 'Roteirização criada.', id: result.rows[0].id });
+    }
+    catch (err) {
+        console.error('[roteirizacao/post]', err);
+        res.status(500).json({ erro: 'Erro ao criar roteirização.' });
+    }
+});
+rotRouter.put('/:id', auth_1.authMiddleware, async (req, res) => {
+    try {
+        const id = req.params.id;
+        const { customer_number, codigo_vendedor, dia_semana, frequencia } = req.body;
+        let vendedor_id;
+        if (codigo_vendedor) {
+            const vendedor = await (0, database_1.query)('SELECT id FROM vendedores WHERE codigo_vendedor = $1', [codigo_vendedor]);
+            if (vendedor.rows.length === 0) {
+                return res.status(404).json({ erro: 'Vendedor não encontrado.' });
+            }
+            vendedor_id = vendedor.rows[0].id;
+        }
+        await (0, database_1.query)(`
+            UPDATE roteirizacao SET
+                customer_number = COALESCE($1, customer_number),
+                vendedor_id     = COALESCE($2, vendedor_id),
+                dia_semana      = COALESCE($3, dia_semana),
+                frequencia      = COALESCE($4, frequencia)
+            WHERE id = $5
+        `, [customer_number ?? null, vendedor_id ?? null, dia_semana ?? null, frequencia ?? null, id]);
+        res.json({ mensagem: 'Roteirização atualizada.' });
+    }
+    catch (err) {
+        console.error('[roteirizacao/put]', err);
+        res.status(500).json({ erro: 'Erro ao atualizar roteirização.' });
+    }
+});
+rotRouter.delete('/:id', auth_1.authMiddleware, async (req, res) => {
+    try {
+        const id = req.params.id;
+        await (0, database_1.query)('UPDATE roteirizacao SET ativa = FALSE WHERE id = $1', [id]);
+        res.json({ mensagem: 'Roteirização removida.' });
+    }
+    catch (err) {
+        console.error('[roteirizacao/delete]', err);
+        res.status(500).json({ erro: 'Erro ao remover roteirização.' });
     }
 });
 // ─── cadastrosRoutes.js ───────────────────────────────────────────────────────

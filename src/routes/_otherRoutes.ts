@@ -8,37 +8,48 @@ const rupturaRouter = express.Router();
 rupturaRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
     try {
         const { mes, ano, vendedor_id, page = 1, limit = 50 } = req.query;
-        const mesUsar = Number(mes || new Date().getMonth() + 1);
-        const anoUsar = Number(ano || new Date().getFullYear());
         const fvId = req.filtroVendedor || vendedor_id;
 
-        const params: any[] = [mesUsar, anoUsar];
-        let p = 3;
-        const extra = [];
-        if (fvId) { extra.push(`r.vendedor_id = $${p++}`); params.push(fvId); }
+        const where = [];
+        const params: any[] = [];
+        let p = 1;
 
-        const eStr = extra.length ? 'AND ' + extra.join(' AND ') : '';
+        if (mes) {
+            where.push(`r.mes_numero = $${p++}`);
+            params.push(Number(mes));
+        }
+        if (ano) {
+            where.push(`r.ano = $${p++}`);
+            params.push(Number(ano));
+        }
+        if (fvId) {
+            where.push(`r.vendedor_id = $${p++}`);
+            params.push(fvId);
+        }
+
+        const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
         const offset = (Number(page) - 1) * Number(limit);
 
         const rows = await query(`
             SELECT
                 r.id, r.customer_number, r.status_ruptura, r.justificativa,
                 r.pedido_em_carteira, r.observacao_ruptura,
-                r.observacao_cancelamento, r.mes_numero, r.ano,
+                r.observacao_cancelamento, r.data_solicitacao_cancelamento,
+                r.mes_numero, r.ano,
                 c.customer_name, c.city, c.canal_cliente, c.segmentacao_cliente,
                 c.telefone, c.nova_rup, c.cnpj,
                 v.nome AS vendedor_nome, v.setor
             FROM ruptura r
             JOIN clientes c ON c.customer_number = r.customer_number
             LEFT JOIN vendedores v ON v.id = r.vendedor_id
-            WHERE r.mes_numero = $1 AND r.ano = $2 ${eStr}
+            ${whereSql}
             ORDER BY c.segmentacao_cliente, c.customer_name
             LIMIT $${p++} OFFSET $${p++}
         `, [...params, Number(limit), offset]);
 
         const total = await query(
-            `SELECT COUNT(*) FROM ruptura r WHERE mes_numero = $1 AND ano = $2 ${eStr}`,
-            [mesUsar, anoUsar, ...(fvId ? [fvId] : [])]
+            `SELECT COUNT(*) FROM ruptura r ${whereSql}`,
+            params
         );
 
         res.json({ total: Number(total.rows[0].count), pagina: Number(page), dados: rows.rows });
@@ -49,16 +60,25 @@ rupturaRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
 
 rupturaRouter.put('/:id', authMiddleware, async (req, res) => {
     try {
-        const { justificativa, observacao_ruptura, observacao_cancelamento, status_ruptura } = req.body;
+        const {
+            justificativa, observacao_ruptura, observacao_cancelamento,
+            pedido_em_carteira, data_solicitacao_cancelamento, status_ruptura,
+        } = req.body;
         await query(`
             UPDATE ruptura SET
-                justificativa = COALESCE($1, justificativa),
-                observacao_ruptura = COALESCE($2, observacao_ruptura),
-                observacao_cancelamento = COALESCE($3, observacao_cancelamento),
-                status_ruptura = COALESCE($4, status_ruptura),
-                updated_at = NOW()
-            WHERE id = $5
-        `, [justificativa, observacao_ruptura, observacao_cancelamento, status_ruptura, req.params.id]);
+                justificativa                 = COALESCE($1, justificativa),
+                observacao_ruptura            = COALESCE($2, observacao_ruptura),
+                observacao_cancelamento       = COALESCE($3, observacao_cancelamento),
+                pedido_em_carteira            = COALESCE($4, pedido_em_carteira),
+                data_solicitacao_cancelamento = COALESCE($5, data_solicitacao_cancelamento),
+                status_ruptura                = COALESCE($6, status_ruptura),
+                updated_at                    = NOW()
+            WHERE id = $7
+        `, [
+            justificativa, observacao_ruptura, observacao_cancelamento,
+            pedido_em_carteira, data_solicitacao_cancelamento, status_ruptura,
+            req.params.id,
+        ]);
         res.json({ mensagem: 'Ruptura atualizada.' });
     } catch (err) {
         res.status(500).json({ erro: 'Erro ao atualizar ruptura.' });

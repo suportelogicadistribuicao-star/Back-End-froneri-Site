@@ -39,54 +39,6 @@ router.post('/vendas', ...protegido, multer_1.default.single('arquivo'), async (
     }
 });
 /**
- * POST /api/import/base-ativa
- * Importa Base_Froneri_Ativa_Roteirizações (.xlsx)
- */
-router.post('/base-ativa', ...protegido, multer_1.default.single('arquivo'), async (req, res) => {
-    if (!req.file)
-        return res.status(400).json({ erro: 'Nenhum arquivo enviado.' });
-    try {
-        const resultado = await (0, importService_1.importarBaseAtiva)(req.file.path, req.usuario.id);
-        res.json({
-            mensagem: 'Base Ativa importada com sucesso.',
-            importacaoId: resultado.logId,
-            contadores: resultado.contadores,
-        });
-    }
-    catch (err) {
-        res.status(500).json({ erro: `Erro na importação: ${err.message}` });
-    }
-    finally {
-        if (req.file?.path && fs_1.default.existsSync(req.file.path)) {
-            fs_1.default.unlinkSync(req.file.path);
-        }
-    }
-});
-/**
- * POST /api/import/cadastros
- * Importa CADASTROS_FRONERI (.xlsx)
- */
-router.post('/cadastros', ...protegido, multer_1.default.single('arquivo'), async (req, res) => {
-    if (!req.file)
-        return res.status(400).json({ erro: 'Nenhum arquivo enviado.' });
-    try {
-        const resultado = await (0, importService_1.importarCadastros)(req.file.path, req.usuario.id);
-        res.json({
-            mensagem: 'Cadastros importados com sucesso.',
-            importacaoId: resultado.logId,
-            contadores: resultado.contadores,
-        });
-    }
-    catch (err) {
-        res.status(500).json({ erro: `Erro na importação: ${err.message}` });
-    }
-    finally {
-        if (req.file?.path && fs_1.default.existsSync(req.file.path)) {
-            fs_1.default.unlinkSync(req.file.path);
-        }
-    }
-});
-/**
  * GET /api/import/historico
  * Histórico de importações realizadas
  */

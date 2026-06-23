@@ -72,7 +72,7 @@ router.get('/resumo', auth_1.authMiddleware, auth_1.ownDataOnly, async (req, res
             params.push(Number(ano));
         }
         const wStr = where.length ? 'WHERE ' + where.join(' AND ') : '';
-        const grupoCol = agrupar === 'vendedor' ? 'vendedor_id, vendedor_descricao' : 'categoria';
+        const grupoCol = agrupar === 'vendedor' ? 'vendedor_id, vendedor_alias' : 'categoria';
         const rows = await (0, database_1.query)(`
             SELECT ${grupoCol},
                    SUM(valor_nf) AS valor_nf, SUM(soma_caixas) AS caixas,
