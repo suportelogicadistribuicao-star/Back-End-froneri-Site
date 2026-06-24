@@ -72,7 +72,8 @@ router.get('/vendas', ...protegido, async (_req, res) => {
  */
 router.get('/historico', ...protegido, async (req, res) => {
     try {
-        const { limit = 20 } = req.query;
+        const rawLimit = Number(req.query.limit || 20);
+        const limit = Math.min(Math.max(rawLimit, 1), 100);
         const rows = await (0, database_1.query)(`
             SELECT
                 il.id, il.arquivo_nome, il.tipo_arquivo,
@@ -83,9 +84,9 @@ router.get('/historico', ...protegido, async (req, res) => {
                 u.nome AS importado_por
             FROM importacoes_log il
             LEFT JOIN usuarios u ON u.id = il.usuario_id
-            ORDER BY il.created_at DESC
+            ORDER BY il.id DESC
             LIMIT $1
-        `, [Number(limit)]);
+        `, [limit]);
         res.json(rows.rows);
     }
     catch (err) {

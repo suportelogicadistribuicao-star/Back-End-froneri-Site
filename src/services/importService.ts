@@ -15,6 +15,7 @@
 import * as XLSX from 'xlsx';
 import path from 'path';
 import fs from 'fs';
+import { randomUUID } from 'crypto';
 import { withTransaction, query } from '../config/database';
 
 // ─── Mapa de Vendedores por descrição/território ─────────────────────────────
@@ -219,6 +220,33 @@ function sheetToRows(wb, sheetName) {
     return normalizeKeys(rows);
 }
 
+function normalizeSheetName(name: string) {
+    return String(name || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .trim()
+        .replace(/\s+/g, ' ')
+        .toLowerCase();
+}
+
+function findSheetName(wb: any, expected: string, aliases: string[] = []) {
+    const names = Object.keys(wb?.Sheets || {});
+    const candidates = [expected, ...aliases].map(normalizeSheetName);
+
+    for (const name of names) {
+        const normalized = normalizeSheetName(name);
+        if (candidates.includes(normalized)) return name;
+    }
+
+    return null;
+}
+
+function sheetToRowsFlexible(wb: any, expected: string, aliases: string[] = []) {
+    const realName = findSheetName(wb, expected, aliases);
+    if (!realName) return { rows: [], sheetName: null as string | null };
+    return { rows: sheetToRows(wb, realName), sheetName: realName };
+}
+
 // Lê um campo com suporte a múltiplos nomes alternativos.
 function col(row: Record<string, unknown>, ...names: string[]): unknown {
     for (const name of names) {
@@ -246,12 +274,31 @@ async function processarRelatorioVendas(filePath, usuarioId, logId) {
 
     try {
         const wb = readWorkbook(filePath);
-        const vendasRows = sheetToRows(wb, 'Base Vendas');
-        const pedidosRows = sheetToRows(wb, 'Base Ordens Carteira');
+        const vendasSheet = sheetToRowsFlexible(wb, 'Base Vendas', ['Base vendas', 'Vendas']);
+        const pedidosSheet = sheetToRowsFlexible(wb, 'Base Ordens Carteira', ['Base Ordens de Carteira', 'Ordens Carteira']);
+        const rupturaSheet = sheetToRowsFlexible(wb, 'Base Ruptura', ['Ruptura', 'Base ruptura']);
+
+        const vendasRows = vendasSheet.rows;
+        const pedidosRows = pedidosSheet.rows;
         const periodoRelatorio = inferPeriodoRelatorio(filePath, vendasRows, pedidosRows);
 
         // ── 1a. Base Ruptura — PRIMEIRO (popula clientes) ─────────────────────
-        const rupturaRows = sheetToRows(wb, 'Base Ruptura');
+        const rupturaRows = rupturaSheet.rows;
+
+        if (vendasRows.length === 0 && pedidosRows.length === 0 && rupturaRows.length === 0) {
+            const disponiveis = Object.keys(wb?.Sheets || {}).join(', ');
+            throw new Error(
+                `Nenhuma linha encontrada nas abas esperadas. Abas encontradas: [${disponiveis}]. ` +
+                `Esperadas: Base Ruptura, Base Vendas, Base Ordens Carteira.`
+            );
+        }
+
+        console.log('[import/vendas] Abas lidas:', {
+            ruptura: rupturaSheet.sheetName,
+            vendas: vendasSheet.sheetName,
+            pedidos: pedidosSheet.sheetName,
+            linhas: { ruptura: rupturaRows.length, vendas: vendasRows.length, pedidos: pedidosRows.length },
+        });
         if (rupturaRows.length > 0) {
             await importarClientesDaBase(rupturaRows);
             contadores.clientes += rupturaRows.length;
@@ -658,11 +705,12 @@ async function upsertProduto(client, row) {
 
 // ─── Log helpers ─────────────────────────────────────────────────────────────
 async function criarLog(filePath, tipoArquivo, usuarioId) {
-    const result = await query(`
-        INSERT INTO importacoes_log (arquivo_nome, tipo_arquivo, status, usuario_id)
-        VALUES ($1, $2, 'processando', $3)
-    `, [path.basename(filePath), tipoArquivo, usuarioId]);
-    return result.insertId;
+    const logId = randomUUID();
+    await query(`
+        INSERT INTO importacoes_log (id, arquivo_nome, tipo_arquivo, status, usuario_id)
+        VALUES ($1, $2, $3, 'processando', $4)
+    `, [logId, path.basename(filePath), tipoArquivo, usuarioId]);
+    return logId;
 }
 
 async function finalizarLog(logId, status, contadores, erros) {
