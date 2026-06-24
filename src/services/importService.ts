@@ -276,10 +276,10 @@ async function importarRelatorioVendas(filePath, usuarioId) {
                                 customer_number, vendedor_id, status_ruptura,
                                 mes_referencia, mes_numero, ano, importacao_id
                             ) VALUES ($1,$2,$3,$4,$5,$6,$7)
-                            ON CONFLICT (customer_number, mes_numero, ano) DO UPDATE SET
-                                vendedor_id    = EXCLUDED.vendedor_id,
-                                status_ruptura = EXCLUDED.status_ruptura,
-                                importacao_id  = EXCLUDED.importacao_id,
+                            ON DUPLICATE KEY UPDATE
+                                vendedor_id    = VALUES(vendedor_id),
+                                status_ruptura = VALUES(status_ruptura),
+                                importacao_id  = VALUES(importacao_id),
                                 updated_at     = NOW()
                         `, [
                             customerNumber,
@@ -327,8 +327,8 @@ async function importarRelatorioVendas(filePath, usuarioId) {
                             INSERT INTO clientes (customer_number, customer_name, cnpj, city,
                                 canal_cliente, hierarquia, segmentacao_cliente, filial, vendedor_id)
                             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-                            ON CONFLICT (customer_number) DO UPDATE SET
-                                customer_name = EXCLUDED.customer_name,
+                            ON DUPLICATE KEY UPDATE
+                                customer_name = VALUES(customer_name),
                                 updated_at    = NOW()
                         `, [
                             normNum(row['Customer Number']),
@@ -356,14 +356,13 @@ async function importarRelatorioVendas(filePath, usuarioId) {
                                 $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
                                 $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29
                             )
-                            ON CONFLICT (customer_number, numero_nf, cod_item, data_faturamento)
-                            DO UPDATE SET
-                                status_venda = EXCLUDED.status_venda,
-                                soma_caixas  = EXCLUDED.soma_caixas,
-                                soma_pallets = EXCLUDED.soma_pallets,
-                                soma_litros  = EXCLUDED.soma_litros,
-                                valor_nf     = EXCLUDED.valor_nf,
-                                valor_vbc    = EXCLUDED.valor_vbc
+                            ON DUPLICATE KEY UPDATE
+                                status_venda = VALUES(status_venda),
+                                soma_caixas  = VALUES(soma_caixas),
+                                soma_pallets = VALUES(soma_pallets),
+                                soma_litros  = VALUES(soma_litros),
+                                valor_nf     = VALUES(valor_nf),
+                                valor_vbc    = VALUES(valor_vbc)
                         `, [
                             normNum(row['Customer Number']),
                             norm(row['Customer Name']),
@@ -435,29 +434,29 @@ async function importarRelatorioVendas(filePath, usuarioId) {
                                 $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
                                 $16,$17,$18,$19,$20,$21,$22,$23,$24,$25
                             )
-                            ON CONFLICT (order_number, cod_item) DO UPDATE SET
-                                customer_name       = EXCLUDED.customer_name,
-                                order_date          = EXCLUDED.order_date,
-                                vendedor_id         = EXCLUDED.vendedor_id,
-                                vendedor_alias      = EXCLUDED.vendedor_alias,
-                                territory_number    = EXCLUDED.territory_number,
-                                descricao_produto   = EXCLUDED.descricao_produto,
-                                categoria           = EXCLUDED.categoria,
-                                subcategoria        = EXCLUDED.subcategoria,
-                                soma_litros         = EXCLUDED.soma_litros,
-                                quantity_shipped    = EXCLUDED.quantity_shipped,
-                                extended_amount     = EXCLUDED.extended_amount,
-                                soma_pallets        = EXCLUDED.soma_pallets,
-                                segmento_sku        = EXCLUDED.segmento_sku,
-                                categoria_total_sku = EXCLUDED.categoria_total_sku,
-                                mes_descricao       = EXCLUDED.mes_descricao,
-                                mes_numero          = EXCLUDED.mes_numero,
-                                ano                 = EXCLUDED.ano,
-                                hierarquia          = EXCLUDED.hierarquia,
-                                canal_cliente       = EXCLUDED.canal_cliente,
-                                filial              = EXCLUDED.filial,
-                                status              = EXCLUDED.status,
-                                importacao_id       = EXCLUDED.importacao_id
+                            ON DUPLICATE KEY UPDATE
+                                customer_name       = VALUES(customer_name),
+                                order_date          = VALUES(order_date),
+                                vendedor_id         = VALUES(vendedor_id),
+                                vendedor_alias      = VALUES(vendedor_alias),
+                                territory_number    = VALUES(territory_number),
+                                descricao_produto   = VALUES(descricao_produto),
+                                categoria           = VALUES(categoria),
+                                subcategoria        = VALUES(subcategoria),
+                                soma_litros         = VALUES(soma_litros),
+                                quantity_shipped    = VALUES(quantity_shipped),
+                                extended_amount     = VALUES(extended_amount),
+                                soma_pallets        = VALUES(soma_pallets),
+                                segmento_sku        = VALUES(segmento_sku),
+                                categoria_total_sku = VALUES(categoria_total_sku),
+                                mes_descricao       = VALUES(mes_descricao),
+                                mes_numero          = VALUES(mes_numero),
+                                ano                 = VALUES(ano),
+                                hierarquia          = VALUES(hierarquia),
+                                canal_cliente       = VALUES(canal_cliente),
+                                filial              = VALUES(filial),
+                                status              = VALUES(status),
+                                importacao_id       = VALUES(importacao_id)
                         `, [
                             normNum(col(row, 'Ship To Number', 'Customer Number')),
                             norm(col(row, 'Alpha Name', 'Customer Name')),
@@ -537,36 +536,36 @@ async function importarClientesDaBase(rows) {
                         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
                         $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30
                     )
-                    ON CONFLICT (customer_number) DO UPDATE SET
-                        customer_name        = EXCLUDED.customer_name,
-                        cnpj                 = COALESCE(EXCLUDED.cnpj, clientes.cnpj),
-                        logradouro           = COALESCE(EXCLUDED.logradouro, clientes.logradouro),
-                        bairro               = COALESCE(EXCLUDED.bairro, clientes.bairro),
-                        postal_code          = COALESCE(EXCLUDED.postal_code, clientes.postal_code),
-                        city                 = COALESCE(EXCLUDED.city, clientes.city),
-                        region               = COALESCE(EXCLUDED.region, clientes.region),
-                        filial               = COALESCE(EXCLUDED.filial, clientes.filial),
-                        canal_cliente        = COALESCE(EXCLUDED.canal_cliente, clientes.canal_cliente),
-                        hierarquia           = COALESCE(EXCLUDED.hierarquia, clientes.hierarquia),
-                        hierarquia_code      = COALESCE(EXCLUDED.hierarquia_code, clientes.hierarquia_code),
-                        segmentacao_cliente  = COALESCE(EXCLUDED.segmentacao_cliente, clientes.segmentacao_cliente),
-                        categoria_code24     = COALESCE(EXCLUDED.categoria_code24, clientes.categoria_code24),
-                        payment_terms        = COALESCE(EXCLUDED.payment_terms, clientes.payment_terms),
-                        credit_limit         = COALESCE(EXCLUDED.credit_limit, clientes.credit_limit),
-                        telefone             = COALESCE(EXCLUDED.telefone, clientes.telefone),
-                        gln_number           = COALESCE(EXCLUDED.gln_number, clientes.gln_number),
-                        additional_tax_id    = COALESCE(EXCLUDED.additional_tax_id, clientes.additional_tax_id),
-                        status               = EXCLUDED.status,
-                        nova_rup             = COALESCE(EXCLUDED.nova_rup, clientes.nova_rup),
-                        tem_contrato         = EXCLUDED.tem_contrato,
-                        qtd_conservadora     = COALESCE(EXCLUDED.qtd_conservadora, clientes.qtd_conservadora),
-                        codigo_hierarquia    = COALESCE(EXCLUDED.codigo_hierarquia, clientes.codigo_hierarquia),
-                        descricao1           = COALESCE(EXCLUDED.descricao1, clientes.descricao1),
-                        codigo_setor         = COALESCE(EXCLUDED.codigo_setor, clientes.codigo_setor),
-                        territory_number     = COALESCE(EXCLUDED.territory_number, clientes.territory_number),
-                        territory_description = COALESCE(EXCLUDED.territory_description, clientes.territory_description),
-                        vendedor_id          = COALESCE(EXCLUDED.vendedor_id, clientes.vendedor_id),
-                        ruptura_garoto       = COALESCE(EXCLUDED.ruptura_garoto, clientes.ruptura_garoto),
+                    ON DUPLICATE KEY UPDATE
+                        customer_name        = VALUES(customer_name),
+                        cnpj                 = COALESCE(VALUES(cnpj), clientes.cnpj),
+                        logradouro           = COALESCE(VALUES(logradouro), clientes.logradouro),
+                        bairro               = COALESCE(VALUES(bairro), clientes.bairro),
+                        postal_code          = COALESCE(VALUES(postal_code), clientes.postal_code),
+                        city                 = COALESCE(VALUES(city), clientes.city),
+                        region               = COALESCE(VALUES(region), clientes.region),
+                        filial               = COALESCE(VALUES(filial), clientes.filial),
+                        canal_cliente        = COALESCE(VALUES(canal_cliente), clientes.canal_cliente),
+                        hierarquia           = COALESCE(VALUES(hierarquia), clientes.hierarquia),
+                        hierarquia_code      = COALESCE(VALUES(hierarquia_code), clientes.hierarquia_code),
+                        segmentacao_cliente  = COALESCE(VALUES(segmentacao_cliente), clientes.segmentacao_cliente),
+                        categoria_code24     = COALESCE(VALUES(categoria_code24), clientes.categoria_code24),
+                        payment_terms        = COALESCE(VALUES(payment_terms), clientes.payment_terms),
+                        credit_limit         = COALESCE(VALUES(credit_limit), clientes.credit_limit),
+                        telefone             = COALESCE(VALUES(telefone), clientes.telefone),
+                        gln_number           = COALESCE(VALUES(gln_number), clientes.gln_number),
+                        additional_tax_id    = COALESCE(VALUES(additional_tax_id), clientes.additional_tax_id),
+                        status               = VALUES(status),
+                        nova_rup             = COALESCE(VALUES(nova_rup), clientes.nova_rup),
+                        tem_contrato         = VALUES(tem_contrato),
+                        qtd_conservadora     = COALESCE(VALUES(qtd_conservadora), clientes.qtd_conservadora),
+                        codigo_hierarquia    = COALESCE(VALUES(codigo_hierarquia), clientes.codigo_hierarquia),
+                        descricao1           = COALESCE(VALUES(descricao1), clientes.descricao1),
+                        codigo_setor         = COALESCE(VALUES(codigo_setor), clientes.codigo_setor),
+                        territory_number     = COALESCE(VALUES(territory_number), clientes.territory_number),
+                        territory_description = COALESCE(VALUES(territory_description), clientes.territory_description),
+                        vendedor_id          = COALESCE(VALUES(vendedor_id), clientes.vendedor_id),
+                        ruptura_garoto       = COALESCE(VALUES(ruptura_garoto), clientes.ruptura_garoto),
                         updated_at           = NOW()
                 `, [
                     customerNumber,
@@ -618,12 +617,12 @@ async function upsertProduto(client, row) {
     await client.query(`
         INSERT INTO produtos (cod_item, descricao, categoria, subcategoria, segmento_sku, categoria_total_sku)
         VALUES ($1,$2,$3,$4,$5,$6)
-        ON CONFLICT (cod_item) DO UPDATE SET
-            descricao           = EXCLUDED.descricao,
-            categoria           = COALESCE(EXCLUDED.categoria, produtos.categoria),
-            subcategoria        = COALESCE(EXCLUDED.subcategoria, produtos.subcategoria),
-            segmento_sku        = COALESCE(EXCLUDED.segmento_sku, produtos.segmento_sku),
-            categoria_total_sku = COALESCE(EXCLUDED.categoria_total_sku, produtos.categoria_total_sku),
+        ON DUPLICATE KEY UPDATE
+            descricao           = VALUES(descricao),
+            categoria           = COALESCE(VALUES(categoria), produtos.categoria),
+            subcategoria        = COALESCE(VALUES(subcategoria), produtos.subcategoria),
+            segmento_sku        = COALESCE(VALUES(segmento_sku), produtos.segmento_sku),
+            categoria_total_sku = COALESCE(VALUES(categoria_total_sku), produtos.categoria_total_sku),
             updated_at          = NOW()
     `, [
         codItem,
@@ -637,12 +636,11 @@ async function upsertProduto(client, row) {
 
 // ─── Log helpers ─────────────────────────────────────────────────────────────
 async function criarLog(filePath, tipoArquivo, usuarioId) {
-    const res = await query(`
+    const result = await query(`
         INSERT INTO importacoes_log (arquivo_nome, tipo_arquivo, status, usuario_id)
         VALUES ($1, $2, 'processando', $3)
-        RETURNING id
     `, [path.basename(filePath), tipoArquivo, usuarioId]);
-    return res.rows[0].id;
+    return result.insertId;
 }
 
 async function finalizarLog(logId, status, contadores, erros) {

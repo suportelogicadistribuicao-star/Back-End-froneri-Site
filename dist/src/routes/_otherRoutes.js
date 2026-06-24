@@ -47,7 +47,7 @@ rupturaRouter.get('/', auth_1.authMiddleware, auth_1.ownDataOnly, async (req, re
             ORDER BY c.segmentacao_cliente, c.customer_name
             LIMIT $${p++} OFFSET $${p++}
         `, [...params, Number(limit), offset]);
-        const total = await (0, database_1.query)(`SELECT COUNT(*) FROM ruptura r ${whereSql}`, params);
+        const total = await (0, database_1.query)(`SELECT COUNT(*) AS count FROM ruptura r ${whereSql}`, params);
         res.json({ total: Number(total.rows[0].count), pagina: Number(page), dados: rows.rows });
     }
     catch (err) {
@@ -167,9 +167,8 @@ rotRouter.post('/', auth_1.authMiddleware, async (req, res) => {
         const result = await (0, database_1.query)(`
             INSERT INTO roteirizacao (customer_number, vendedor_id, dia_semana, frequencia, ativa)
             VALUES ($1, $2, $3, $4, TRUE)
-            RETURNING id
         `, [customer_number, vendedor_id, dia_semana, frequencia]);
-        res.status(201).json({ mensagem: 'Roteirização criada.', id: result.rows[0].id });
+        res.status(201).json({ mensagem: 'Roteirização criada.', id: result.insertId });
     }
     catch (err) {
         console.error('[roteirizacao/post]', err);

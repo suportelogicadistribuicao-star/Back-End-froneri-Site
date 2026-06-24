@@ -54,15 +54,15 @@ router.post('/', auth_1.authMiddleware, async (req, res) => {
         const slotRes = await (0, database_1.query)('SELECT id FROM vendedores WHERE id = $1 AND nome IS NULL AND ativo = TRUE', [alias_id]);
         if (slotRes.rows.length === 0)
             return res.status(404).json({ erro: 'Slot de alias não encontrado ou já associado a um vendedor.' });
-        const result = await (0, database_1.query)(`
+        await (0, database_1.query)(`
             UPDATE vendedores SET
                 nome       = $1,
                 email      = $2,
                 telefone   = $3,
                 updated_at = NOW()
             WHERE id = $4
-            RETURNING *
         `, [nome.trim(), email || null, telefone || null, alias_id]);
+        const result = await (0, database_1.query)('SELECT * FROM vendedores WHERE id = $1', [alias_id]);
         res.status(201).json(result.rows[0]);
     }
     catch (err) {

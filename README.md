@@ -6,7 +6,7 @@ Backend ERP Froneri em Node.js + TypeScript.
 
 - Node.js 18+
 - npm
-- PostgreSQL
+- MySQL 8+
 
 ## Instalação
 
@@ -23,9 +23,9 @@ PORT=8080
 NODE_ENV=development
 
 DB_HOST=localhost
-DB_PORT=5432
+DB_PORT=3306
 DB_NAME=erp_froneri
-DB_USER=erp_froneri_user
+DB_USER=root
 DB_PASSWORD=sua_senha
 DB_SSL=false
 

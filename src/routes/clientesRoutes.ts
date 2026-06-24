@@ -57,12 +57,14 @@ router.post('/', authMiddleware, ownDataOnly, async (req, res) => {
         const values = Object.values(payload);
         const placeholders = fields.map((_, i) => `$${i + 1}`);
 
-        const created = await query(
+        const createdInsert = await query(
             `INSERT INTO clientes (${fields.join(', ')})
-             VALUES (${placeholders.join(', ')})
-             RETURNING *`,
+             VALUES (${placeholders.join(', ')})`,
             values
         );
+
+        const createdId = payload.customer_number ?? createdInsert.insertId;
+        const created = await query('SELECT * FROM clientes WHERE customer_number = $1', [createdId]);
 
         res.status(201).json(created.rows[0]);
     } catch (err) {
@@ -115,7 +117,7 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
         const whereClause = 'WHERE ' + where.join(' AND ');
 
         const total = await query(
-            `SELECT COUNT(*) FROM clientes c ${whereClause}`, params
+            `SELECT COUNT(*) AS count FROM clientes c ${whereClause}`, params
         );
 
         const rows = await query(`
@@ -298,13 +300,14 @@ router.put('/:id', authMiddleware, ownDataOnly, async (req, res) => {
         const setClause = fields.map((field, i) => `${field} = $${i + 1}`).join(', ');
         const values = [...fields.map((field) => payload[field]), id];
 
-        const updated = await query(
+        await query(
             `UPDATE clientes
              SET ${setClause}, updated_at = NOW()
-             WHERE customer_number = $${values.length}
-             RETURNING *`,
+             WHERE customer_number = $${values.length}`,
             values
         );
+
+        const updated = await query('SELECT * FROM clientes WHERE customer_number = $1', [id]);
 
         res.json(updated.rows[0]);
     } catch (err) {

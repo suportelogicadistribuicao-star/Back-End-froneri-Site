@@ -49,9 +49,10 @@ router.post('/', auth_1.authMiddleware, auth_1.ownDataOnly, async (req, res) => 
         const fields = Object.keys(payload);
         const values = Object.values(payload);
         const placeholders = fields.map((_, i) => `$${i + 1}`);
-        const created = await (0, database_1.query)(`INSERT INTO clientes (${fields.join(', ')})
-             VALUES (${placeholders.join(', ')})
-             RETURNING *`, values);
+        const createdInsert = await (0, database_1.query)(`INSERT INTO clientes (${fields.join(', ')})
+             VALUES (${placeholders.join(', ')})`, values);
+        const createdId = payload.customer_number ?? createdInsert.insertId;
+        const created = await (0, database_1.query)('SELECT * FROM clientes WHERE customer_number = $1', [createdId]);
         res.status(201).json(created.rows[0]);
     }
     catch (err) {
@@ -107,7 +108,7 @@ router.get('/', auth_1.authMiddleware, auth_1.ownDataOnly, async (req, res) => {
             )`);
         }
         const whereClause = 'WHERE ' + where.join(' AND ');
-        const total = await (0, database_1.query)(`SELECT COUNT(*) FROM clientes c ${whereClause}`, params);
+        const total = await (0, database_1.query)(`SELECT COUNT(*) AS count FROM clientes c ${whereClause}`, params);
         const rows = await (0, database_1.query)(`
             SELECT
                 c.customer_number, c.customer_name, c.cnpj, c.city,
@@ -270,10 +271,10 @@ router.put('/:id', auth_1.authMiddleware, auth_1.ownDataOnly, async (req, res) =
         }
         const setClause = fields.map((field, i) => `${field} = $${i + 1}`).join(', ');
         const values = [...fields.map((field) => payload[field]), id];
-        const updated = await (0, database_1.query)(`UPDATE clientes
+        await (0, database_1.query)(`UPDATE clientes
              SET ${setClause}, updated_at = NOW()
-             WHERE customer_number = $${values.length}
-             RETURNING *`, values);
+             WHERE customer_number = $${values.length}`, values);
+        const updated = await (0, database_1.query)('SELECT * FROM clientes WHERE customer_number = $1', [id]);
         res.json(updated.rows[0]);
     }
     catch (err) {

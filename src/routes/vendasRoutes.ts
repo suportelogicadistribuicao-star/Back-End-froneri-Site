@@ -23,7 +23,7 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
         const wStr = where.length ? 'WHERE ' + where.join(' AND ') : '';
 
         const [total, rows] = await Promise.all([
-            query(`SELECT COUNT(*) FROM vendas ${wStr}`, params),
+            query(`SELECT COUNT(*) AS count FROM vendas ${wStr}`, params),
             query(`
                 SELECT ve.*, v.nome AS vendedor_nome
                 FROM vendas ve

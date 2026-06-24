@@ -130,11 +130,15 @@ router.post('/register', async (req, res) => {
 
         const senhaHash = await bcrypt.hash(String(senha), 12);
 
-        const criado = await query(
+        const criadoInsert = await query(
             `INSERT INTO usuarios (nome, email, senha_hash, role, ativo)
-             VALUES ($1, $2, $3, $4, TRUE)
-             RETURNING id, nome, email, role, ativo`,
+             VALUES ($1, $2, $3, $4, TRUE)`,
             [nomeNormalizado, emailNormalizado, senhaHash, roleFinal]
+        );
+
+        const criado = await query(
+            'SELECT id, nome, email, role, ativo FROM usuarios WHERE id = $1',
+            [criadoInsert.insertId]
         );
 
         return res.status(201).json({
@@ -193,14 +197,18 @@ router.post('/register-vendedor', authMiddleware, requireRole('admin'), async (r
         const senhaHash = await bcrypt.hash(String(senha), 12);
 
         const resultado = await withTransaction(async (client) => {
-            const usuarioCriado = await client.query(
+            const usuarioCriadoInsert = await client.query(
                 `INSERT INTO usuarios (nome, email, senha_hash, role, ativo)
-                 VALUES ($1, $2, $3, 'vendedor', TRUE)
-                 RETURNING id, nome, email, role, ativo`,
+                 VALUES ($1, $2, $3, 'vendedor', TRUE)`,
                 [nomeFinal, emailNormalizado, senhaHash]
             );
 
-            const usuarioId = usuarioCriado.rows[0].id;
+            const usuarioId = usuarioCriadoInsert.insertId;
+
+            const usuarioCriado = await client.query(
+                'SELECT id, nome, email, role, ativo FROM usuarios WHERE id = $1',
+                [usuarioId]
+            );
 
             const vinculacao = await client.query(
                 'UPDATE vendedores SET usuario_id = $1 WHERE id = $2 AND usuario_id IS NULL',

@@ -1,59 +1,94 @@
-import { Pool } from 'pg';
+import mysql from 'mysql2/promise';
 
-const pool = new Pool({
-    host:     process.env.DB_HOST     || 'localhost',
-    port:     parseInt(process.env.DB_PORT || '5432'),
-    database: process.env.DB_NAME     || 'erp_froneri',
-    user:     process.env.DB_USER     || 'erp_froneri_user',
+const pool = mysql.createPool({
+    host: process.env.DB_HOST || 'localhost',
+    port: parseInt(process.env.DB_PORT || '3306', 10),
+    database: process.env.DB_NAME || 'erp_froneri',
+    user: process.env.DB_USER || 'root',
     password: process.env.DB_PASSWORD,
-    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : false,
-    max: 20,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 5000,
+    ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
+    waitForConnections: true,
+    connectionLimit: 20,
+    queueLimit: 0,
+    enableKeepAlive: true,
+    keepAliveInitialDelay: 0,
 });
 
-pool.on('error', (err) => {
-    console.error('[DB] Erro inesperado no pool:', err.message);
-});
+function normalizeSql(sql: string): string {
+    return sql
+        .replace(/\$\d+/g, '?')
+        .replace(/\bILIKE\b/g, 'LIKE')
+        .replace(/::int\b/g, '')
+        .replace(/unaccent\(([^)]+)\)/g, '$1');
+}
 
-// Wrapper para queries com log de erro
+function toResult(rows: any, meta: any) {
+    if (Array.isArray(rows)) {
+        return {
+            rows,
+            rowCount: rows.length,
+            insertId: null,
+            affectedRows: 0,
+            fields: meta,
+        };
+    }
+
+    return {
+        rows: [],
+        rowCount: rows?.affectedRows ?? 0,
+        insertId: rows?.insertId ?? null,
+        affectedRows: rows?.affectedRows ?? 0,
+        fields: meta,
+    };
+}
+
+// Wrapper para queries com log e formato compatível com o uso atual do projeto.
 async function query(text: any, params: any[] = []): Promise<any> {
     const start = Date.now();
+    const sql = normalizeSql(String(text));
     try {
-        const result = await pool.query(text, params);
+        const [rows, fields] = await pool.query(sql, params);
         const duration = Date.now() - start;
         if (duration > 1000) {
-            console.warn(`[DB] Query lenta (${duration}ms):`, text.substring(0, 80));
+            console.warn(`[DB] Query lenta (${duration}ms):`, sql.substring(0, 80));
         }
-        return result;
-    } catch (err) {
-        console.error('[DB] Erro na query:', err.message, '\nSQL:', text.substring(0, 200));
+        return toResult(rows, fields);
+    } catch (err: any) {
+        console.error('[DB] Erro na query:', err.message, '\nSQL:', sql.substring(0, 200));
         throw err;
     }
 }
 
-// Transação helper
+// Transação helper compatível com callback atual.
 async function withTransaction(callback: (client: any) => Promise<any>): Promise<any> {
-    const client = await pool.connect();
+    const conn = await pool.getConnection();
+    const client = {
+        query: async (text: any, params: any[] = []) => {
+            const sql = normalizeSql(String(text));
+            const [rows, fields] = await conn.query(sql, params);
+            return toResult(rows, fields);
+        },
+    };
+
     try {
-        await client.query('BEGIN');
+        await conn.beginTransaction();
         const result = await callback(client);
-        await client.query('COMMIT');
+        await conn.commit();
         return result;
     } catch (err) {
-        await client.query('ROLLBACK');
+        await conn.rollback();
         throw err;
     } finally {
-        client.release();
+        conn.release();
     }
 }
 
 async function testConnection() {
     try {
-        const res = await query('SELECT NOW() AS now, version() AS version');
-        console.log('[DB] Conectado ao PostgreSQL:', res.rows[0].now);
+        const res = await query('SELECT NOW() AS now, VERSION() AS version');
+        console.log('[DB] Conectado ao MySQL:', res.rows[0].now);
         return true;
-    } catch (err) {
+    } catch (err: any) {
         console.error('[DB] Falha na conexão:', err.message);
         return false;
     }

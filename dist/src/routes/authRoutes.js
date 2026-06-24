@@ -110,9 +110,9 @@ router.post('/register', async (req, res) => {
             return res.status(400).json({ erro: 'Role inválida. Use: admin, gerente ou vendedor.' });
         }
         const senhaHash = await bcryptjs_1.default.hash(String(senha), 12);
-        const criado = await (0, database_1.query)(`INSERT INTO usuarios (nome, email, senha_hash, role, ativo)
-             VALUES ($1, $2, $3, $4, TRUE)
-             RETURNING id, nome, email, role, ativo`, [nomeNormalizado, emailNormalizado, senhaHash, roleFinal]);
+        const criadoInsert = await (0, database_1.query)(`INSERT INTO usuarios (nome, email, senha_hash, role, ativo)
+             VALUES ($1, $2, $3, $4, TRUE)`, [nomeNormalizado, emailNormalizado, senhaHash, roleFinal]);
+        const criado = await (0, database_1.query)('SELECT id, nome, email, role, ativo FROM usuarios WHERE id = $1', [criadoInsert.insertId]);
         return res.status(201).json({
             mensagem: 'Usuário criado com sucesso.',
             usuario: criado.rows[0]
@@ -156,10 +156,10 @@ router.post('/register-vendedor', auth_1.authMiddleware, (0, auth_1.requireRole)
         }
         const senhaHash = await bcryptjs_1.default.hash(String(senha), 12);
         const resultado = await (0, database_1.withTransaction)(async (client) => {
-            const usuarioCriado = await client.query(`INSERT INTO usuarios (nome, email, senha_hash, role, ativo)
-                 VALUES ($1, $2, $3, 'vendedor', TRUE)
-                 RETURNING id, nome, email, role, ativo`, [nomeFinal, emailNormalizado, senhaHash]);
-            const usuarioId = usuarioCriado.rows[0].id;
+            const usuarioCriadoInsert = await client.query(`INSERT INTO usuarios (nome, email, senha_hash, role, ativo)
+                 VALUES ($1, $2, $3, 'vendedor', TRUE)`, [nomeFinal, emailNormalizado, senhaHash]);
+            const usuarioId = usuarioCriadoInsert.insertId;
+            const usuarioCriado = await client.query('SELECT id, nome, email, role, ativo FROM usuarios WHERE id = $1', [usuarioId]);
             const vinculacao = await client.query('UPDATE vendedores SET usuario_id = $1 WHERE id = $2 AND usuario_id IS NULL', [usuarioId, vendedor.id]);
             if (vinculacao.rowCount !== 1) {
                 throw new Error('Não foi possível vincular o usuário ao vendedor.');

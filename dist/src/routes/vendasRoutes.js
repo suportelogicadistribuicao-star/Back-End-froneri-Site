@@ -35,7 +35,7 @@ router.get('/', auth_1.authMiddleware, auth_1.ownDataOnly, async (req, res) => {
         const offset = (Number(page) - 1) * Number(limit);
         const wStr = where.length ? 'WHERE ' + where.join(' AND ') : '';
         const [total, rows] = await Promise.all([
-            (0, database_1.query)(`SELECT COUNT(*) FROM vendas ${wStr}`, params),
+            (0, database_1.query)(`SELECT COUNT(*) AS count FROM vendas ${wStr}`, params),
             (0, database_1.query)(`
                 SELECT ve.*, v.nome AS vendedor_nome
                 FROM vendas ve
