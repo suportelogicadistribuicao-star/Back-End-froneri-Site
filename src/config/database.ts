@@ -10,10 +10,11 @@ const pool = mysql.createPool({
     password: process.env.DB_PASSWORD,
     ssl: process.env.DB_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
     waitForConnections: true,
-    connectionLimit: 20,
+    connectionLimit: 10,
     queueLimit: 0,
     enableKeepAlive: true,
-    keepAliveInitialDelay: 0,
+    keepAliveInitialDelay: 10000,
+    connectTimeout: 30000,
 });
 
 function normalizeSql(sql: string): string {
