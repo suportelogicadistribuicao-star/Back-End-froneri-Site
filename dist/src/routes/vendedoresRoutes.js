@@ -5,6 +5,70 @@ const express_1 = require("express");
 const database_1 = require("../config/database");
 const auth_1 = require("../middleware/auth");
 const router = (0, express_1.Router)();
+// Lista todos os aliases (disponíveis e preenchidos), com campo `preenchido`
+router.get('/aliases/todos', auth_1.authMiddleware, async (_req, res) => {
+    try {
+        const rows = await (0, database_1.query)(`
+            SELECT v.id, v.codigo_vendedor, v.setor, v.territory_number, v.vendedor_alias,
+                   v.nome, v.email, v.telefone, v.ativo,
+                   (v.nome IS NOT NULL) AS preenchido,
+                   COUNT(DISTINCT c.customer_number) AS total_clientes
+            FROM vendedores v
+            LEFT JOIN clientes c ON c.vendedor_id = v.id AND c.status = 'C'
+            GROUP BY v.id
+            ORDER BY v.vendedor_alias
+        `);
+        res.json(rows.rows);
+    }
+    catch (err) {
+        res.status(500).json({ erro: 'Erro ao listar todos os aliases.' });
+    }
+});
+// // Lista slots de alias disponíveis (ainda sem vendedor real atribuído)
+// router.get('/aliases', authMiddleware, async (_req, res) => {
+//     try {
+//         const rows = await query(`
+//             SELECT v.id, v.codigo_vendedor, v.setor, v.territory_number, v.vendedor_alias,
+//                    COUNT(DISTINCT c.customer_number) AS total_clientes
+//             FROM vendedores v
+//             LEFT JOIN clientes c ON c.vendedor_id = v.id AND c.status = 'C'
+//             WHERE v.nome IS NULL AND v.ativo = TRUE
+//             GROUP BY v.id
+//             ORDER BY v.vendedor_alias
+//         `);
+//         res.json(rows.rows);
+//     } catch (err) {
+//         res.status(500).json({ erro: 'Erro ao listar aliases disponíveis.' });
+//     }
+// });
+// Associa um vendedor real a um slot de alias existente.
+// O slot já tem os dados técnicos da indústria (codigo_vendedor, setor, territory_number).
+// Esta rota apenas preenche nome/email/telefone nesse slot — nenhum novo registro é criado.
+router.post('/', auth_1.authMiddleware, async (req, res) => {
+    const { alias_id, nome, email, telefone } = req.body;
+    if (!alias_id)
+        return res.status(400).json({ erro: 'alias_id é obrigatório.' });
+    if (!nome?.trim())
+        return res.status(400).json({ erro: 'Nome é obrigatório.' });
+    try {
+        const slotRes = await (0, database_1.query)('SELECT id FROM vendedores WHERE id = $1 AND nome IS NULL AND ativo = TRUE', [alias_id]);
+        if (slotRes.rows.length === 0)
+            return res.status(404).json({ erro: 'Slot de alias não encontrado ou já associado a um vendedor.' });
+        const result = await (0, database_1.query)(`
+            UPDATE vendedores SET
+                nome       = $1,
+                email      = $2,
+                telefone   = $3,
+                updated_at = NOW()
+            WHERE id = $4
+            RETURNING *
+        `, [nome.trim(), email || null, telefone || null, alias_id]);
+        res.status(201).json(result.rows[0]);
+    }
+    catch (err) {
+        res.status(500).json({ erro: 'Erro ao criar vendedor.' });
+    }
+});
 router.get('/', auth_1.authMiddleware, async (_req, res) => {
     try {
         const rows = await (0, database_1.query)(`

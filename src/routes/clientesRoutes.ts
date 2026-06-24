@@ -4,6 +4,73 @@ import { authMiddleware, ownDataOnly } from '../middleware/auth';
 
 const router = Router();
 
+function pickClienteFields(body: any): Record<string, any> {
+    const allowed = [
+        'customer_number',
+        'customer_name',
+        'city',
+        'canal_cliente',
+        'segmentacao_cliente',
+        'status',
+        'nova_rup',
+        'observacao',
+        'vendedor_id',
+    ];
+
+    const data: Record<string, any> = {};
+    for (const key of allowed) {
+        if (body[key] !== undefined) data[key] = body[key];
+    }
+
+    // Compatibilidade com payload do front-end.
+    if (body.status_compra !== undefined && data.nova_rup === undefined) {
+        data.nova_rup = body.status_compra;
+    }
+
+    return data;
+}
+
+async function existsClienteForScope(customerNumber: number, filtroVendedor?: number | string): Promise<boolean> {
+    const scoped = await query(
+        `SELECT 1
+         FROM clientes c
+         WHERE c.customer_number = $1
+           ${filtroVendedor ? 'AND c.vendedor_id = $2' : ''}
+         LIMIT 1`,
+        filtroVendedor ? [customerNumber, filtroVendedor] : [customerNumber]
+    );
+    return scoped.rows.length > 0;
+}
+
+// POST /api/clientes
+router.post('/', authMiddleware, ownDataOnly, async (req, res) => {
+    try {
+        const payload = pickClienteFields(req.body || {});
+        if (!payload.customer_name?.toString().trim()) {
+            return res.status(400).json({ erro: 'customer_name é obrigatório.' });
+        }
+
+        if (!payload.status) payload.status = 'C';
+        if (req.filtroVendedor) payload.vendedor_id = req.filtroVendedor;
+
+        const fields = Object.keys(payload);
+        const values = Object.values(payload);
+        const placeholders = fields.map((_, i) => `$${i + 1}`);
+
+        const created = await query(
+            `INSERT INTO clientes (${fields.join(', ')})
+             VALUES (${placeholders.join(', ')})
+             RETURNING *`,
+            values
+        );
+
+        res.status(201).json(created.rows[0]);
+    } catch (err) {
+        console.error('[clientes/create]', err);
+        res.status(500).json({ erro: 'Erro ao criar cliente.' });
+    }
+});
+
 // GET /api/clientes  — lista com filtros e paginação
 router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
     try {
@@ -87,6 +154,50 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
     }
 });
 
+// GET /api/clientes/exportar/csv
+router.get('/exportar/csv', authMiddleware, ownDataOnly, async (req, res) => {
+    try {
+        const fvId = req.filtroVendedor;
+        const rows = await query(`
+            SELECT
+                c.customer_number AS "SOLD",
+                c.customer_name AS "Razão Social",
+                c.cnpj AS "CNPJ",
+                c.city AS "Cidade",
+                c.canal_cliente AS "Canal",
+                c.segmentacao_cliente AS "Segmentação",
+                c.nova_rup AS "Status Compra",
+                c.telefone AS "Telefone",
+                v.nome AS "Vendedor",
+                v.setor AS "Setor",
+                rot.dia_semana AS "Dia Visita",
+                rot.frequencia AS "Frequência"
+            FROM clientes c
+            LEFT JOIN vendedores v ON v.id = c.vendedor_id
+            LEFT JOIN roteirizacao rot ON rot.customer_number = c.customer_number AND rot.ativa = TRUE
+            WHERE c.status = 'C'
+            ${fvId ? 'AND c.vendedor_id = $1' : ''}
+            ORDER BY v.nome, c.customer_name
+        `, fvId ? [fvId] : []);
+
+        if (rows.rows.length === 0) return res.status(404).json({ erro: 'Nenhum dado.' });
+
+        const cols = Object.keys(rows.rows[0]);
+        const csvLines = [
+            cols.join(';'),
+            ...rows.rows.map(r =>
+                cols.map(c => `"${(r[c] ?? '').toString().replace(/"/g, '""')}"`).join(';')
+            )
+        ];
+
+        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+        res.setHeader('Content-Disposition', 'attachment; filename="clientes.csv"');
+        res.send('\uFEFF' + csvLines.join('\r\n'));
+    } catch (err) {
+        res.status(500).json({ erro: 'Erro ao exportar.' });
+    }
+});
+
 // GET /api/clientes/:customerNumber  — detalhe completo
 router.get('/:id', authMiddleware, ownDataOnly, async (req, res) => {
     try {
@@ -143,12 +254,20 @@ router.get('/:id', authMiddleware, ownDataOnly, async (req, res) => {
 });
 
 // PUT /api/clientes/:id/observacao  — atualizar observações manualmente
-router.put('/:id/observacao', authMiddleware, async (req, res) => {
+router.put('/:id/observacao', authMiddleware, ownDataOnly, async (req, res) => {
     try {
+        const id = Number(req.params.id);
+        if (!Number.isFinite(id)) return res.status(400).json({ erro: 'ID inválido.' });
+
+        const allowed = await existsClienteForScope(id, req.filtroVendedor);
+        if (!allowed) {
+            return res.status(404).json({ erro: 'Cliente não encontrado.' });
+        }
+
         const { observacao } = req.body;
         await query(
-            'UPDATE clientes SET updated_at = NOW() WHERE customer_number = $1',
-            [Number(req.params.id)]
+            'UPDATE clientes SET observacao = $1, updated_at = NOW() WHERE customer_number = $2',
+            [observacao ?? null, id]
         );
         res.json({ mensagem: 'Observação salva.' });
     } catch (err) {
@@ -156,47 +275,65 @@ router.put('/:id/observacao', authMiddleware, async (req, res) => {
     }
 });
 
-// GET /api/clientes/exportar/csv
-router.get('/exportar/csv', authMiddleware, ownDataOnly, async (req, res) => {
+// PUT /api/clientes/:id
+router.put('/:id', authMiddleware, ownDataOnly, async (req, res) => {
     try {
-        const fvId = req.filtroVendedor;
-        const rows = await query(`
-            SELECT
-                c.customer_number AS "SOLD",
-                c.customer_name AS "Razão Social",
-                c.cnpj AS "CNPJ",
-                c.city AS "Cidade",
-                c.canal_cliente AS "Canal",
-                c.segmentacao_cliente AS "Segmentação",
-                c.nova_rup AS "Status Compra",
-                c.telefone AS "Telefone",
-                v.nome AS "Vendedor",
-                v.setor AS "Setor",
-                rot.dia_semana AS "Dia Visita",
-                rot.frequencia AS "Frequência"
-            FROM clientes c
-            LEFT JOIN vendedores v ON v.id = c.vendedor_id
-            LEFT JOIN roteirizacao rot ON rot.customer_number = c.customer_number AND rot.ativa = TRUE
-            WHERE c.status = 'C'
-            ${fvId ? 'AND c.vendedor_id = $1' : ''}
-            ORDER BY v.nome, c.customer_name
-        `, fvId ? [fvId] : []);
+        const id = Number(req.params.id);
+        if (!Number.isFinite(id)) return res.status(400).json({ erro: 'ID inválido.' });
 
-        if (rows.rows.length === 0) return res.status(404).json({ erro: 'Nenhum dado.' });
+        const allowed = await existsClienteForScope(id, req.filtroVendedor);
+        if (!allowed) {
+            return res.status(404).json({ erro: 'Cliente não encontrado.' });
+        }
 
-        const cols = Object.keys(rows.rows[0]);
-        const csvLines = [
-            cols.join(';'),
-            ...rows.rows.map(r =>
-                cols.map(c => `"${(r[c] ?? '').toString().replace(/"/g, '""')}"`).join(';')
-            )
-        ];
+        const payload = pickClienteFields(req.body || {});
+        delete payload.customer_number;
+        if (req.filtroVendedor) payload.vendedor_id = req.filtroVendedor;
 
-        res.setHeader('Content-Type', 'text/csv; charset=utf-8');
-        res.setHeader('Content-Disposition', 'attachment; filename="clientes.csv"');
-        res.send('\uFEFF' + csvLines.join('\r\n'));
+        const fields = Object.keys(payload);
+        if (fields.length === 0) {
+            return res.status(400).json({ erro: 'Nenhum campo válido para atualizar.' });
+        }
+
+        const setClause = fields.map((field, i) => `${field} = $${i + 1}`).join(', ');
+        const values = [...fields.map((field) => payload[field]), id];
+
+        const updated = await query(
+            `UPDATE clientes
+             SET ${setClause}, updated_at = NOW()
+             WHERE customer_number = $${values.length}
+             RETURNING *`,
+            values
+        );
+
+        res.json(updated.rows[0]);
     } catch (err) {
-        res.status(500).json({ erro: 'Erro ao exportar.' });
+        console.error('[clientes/update]', err);
+        res.status(500).json({ erro: 'Erro ao atualizar cliente.' });
+    }
+});
+
+// DELETE /api/clientes/:id
+router.delete('/:id', authMiddleware, ownDataOnly, async (req, res) => {
+    try {
+        const id = Number(req.params.id);
+        if (!Number.isFinite(id)) return res.status(400).json({ erro: 'ID inválido.' });
+
+        const allowed = await existsClienteForScope(id, req.filtroVendedor);
+        if (!allowed) {
+            return res.status(404).json({ erro: 'Cliente não encontrado.' });
+        }
+
+        // Exclusão lógica para preservar histórico e relacionamentos.
+        await query(
+            'UPDATE clientes SET status = $1, updated_at = NOW() WHERE customer_number = $2',
+            ['I', id]
+        );
+
+        res.status(204).send();
+    } catch (err) {
+        console.error('[clientes/delete]', err);
+        res.status(500).json({ erro: 'Erro ao remover cliente.' });
     }
 });
 
