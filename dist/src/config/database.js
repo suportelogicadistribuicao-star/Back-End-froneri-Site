@@ -152,6 +152,10 @@ async function ensurePerformanceIndexes() {
             sql: `CREATE INDEX idx_roteirizacao_vendedor_ativa_dia_seq ON roteirizacao (vendedor_id, ativa, dia_semana, sequencia)`,
         },
         {
+            name: 'idx_roteirizacao_ativa_dia_seq_customer',
+            sql: `CREATE INDEX idx_roteirizacao_ativa_dia_seq_customer ON roteirizacao (ativa, dia_semana, sequencia, customer_number, vendedor_id)`,
+        },
+        {
             name: 'idx_roteirizacao_customer_ativa',
             sql: `CREATE INDEX idx_roteirizacao_customer_ativa ON roteirizacao (customer_number, ativa)`,
         },

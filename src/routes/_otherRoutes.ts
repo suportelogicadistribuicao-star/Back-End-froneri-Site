@@ -90,7 +90,7 @@ const rotRouter = express.Router();
 
 rotRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
     try {
-        const { vendedor_id, dia_semana, page = 1, limit = 500 } = req.query;
+        const { vendedor_id, dia_semana, page = 1, limit = 500, ordenar_por_nome } = req.query;
         const fvId = req.filtroVendedor || vendedor_id;
         const params = [];
         const where = ['rot.ativa = TRUE'];
@@ -103,6 +103,11 @@ rotRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
         if (fvId)      { where.push(`rot.vendedor_id = $${p++}`);   params.push(fvId); }
         if (dia_semana){ where.push(`rot.dia_semana = $${p++}`);    params.push(dia_semana); }
 
+        const orderByNome = String(ordenar_por_nome || '').toLowerCase() === 'true';
+        const orderBySql = orderByNome
+            ? 'ORDER BY rot.dia_semana, rot.sequencia, c.customer_name'
+            : 'ORDER BY rot.dia_semana, rot.sequencia, rot.customer_number';
+
         const rows = await query(`
             SELECT
                 rot.id, rot.customer_number, rot.dia_semana, rot.frequencia, rot.sequencia,
@@ -114,7 +119,7 @@ rotRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
             JOIN clientes c ON c.customer_number = rot.customer_number
             LEFT JOIN vendedores v ON v.id = rot.vendedor_id
             WHERE ${where.join(' AND ')}
-            ORDER BY rot.dia_semana, rot.sequencia, c.customer_name
+            ${orderBySql}
             LIMIT $${p++} OFFSET $${p++}
         `, [...params, limitNum, offset]);
 
