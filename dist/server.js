@@ -13,6 +13,7 @@ async function start() {
         console.error('[FATAL] Não foi possível conectar ao banco de dados. Encerrando.');
         process.exit(1);
     }
+    await (0, database_1.ensurePerformanceIndexes)();
     app_1.default.listen(PORT, '0.0.0.0', () => {
         console.log(`[SERVER] ERP Froneri rodando na porta ${PORT}`);
         console.log(`[SERVER] Ambiente: ${process.env.NODE_ENV || 'development'}`);

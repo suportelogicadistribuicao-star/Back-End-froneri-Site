@@ -25,10 +25,21 @@ router.post('/login', async (req, res) => {
         if (!email || !senha) {
             return res.status(400).json({ erro: 'Email e senha são obrigatórios.' });
         }
-        const result = await (0, database_1.query)(`SELECT u.*, v.id AS vendedor_id, v.nome AS vendedor_nome, v.setor
+        const result = await (0, database_1.query)(`SELECT
+                u.id,
+                u.nome,
+                u.email,
+                u.role,
+                u.senha_hash,
+                u.ativo,
+                u.ultimo_login,
+                v.id AS vendedor_id,
+                v.nome AS vendedor_nome,
+                v.setor
              FROM usuarios u
              LEFT JOIN vendedores v ON v.usuario_id = u.id
-             WHERE u.email = $1 AND u.ativo = TRUE`, [email.toLowerCase().trim()]);
+             WHERE u.email = $1 AND u.ativo = TRUE
+             LIMIT 1`, [email.toLowerCase().trim()]);
         if (result.rows.length === 0) {
             return res.status(401).json({ erro: 'Credenciais inválidas.' });
         }
@@ -186,7 +197,8 @@ router.get('/me', auth_1.authMiddleware, async (req, res) => {
                     v.id AS vendedor_id, v.nome AS vendedor_nome, v.setor, v.codigo_vendedor
              FROM usuarios u
              LEFT JOIN vendedores v ON v.usuario_id = u.id
-             WHERE u.id = $1`, [req.usuario.id]);
+             WHERE u.id = $1
+             LIMIT 1`, [req.usuario.id]);
         if (result.rows.length === 0)
             return res.status(404).json({ erro: 'Usuário não encontrado.' });
         res.json(result.rows[0]);

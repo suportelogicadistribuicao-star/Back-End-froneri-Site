@@ -14,8 +14,8 @@ router.get('/', auth_1.authMiddleware, auth_1.ownDataOnly, async (req, res) => {
         const segmentacao = req.query.segmentacao || null;
         const filtroVendedor = req.filtroVendedor;
         // Parâmetros e cláusula WHERE reutilizados em todas as queries de vendas/ruptura/pedidos
-        const p = [mes, ano];
-        let vendaWhere = 'WHERE mes_numero = $1 AND ano = $2';
+        const p = [ano, mes];
+        let vendaWhere = 'WHERE ano = $1 AND mes_numero = $2';
         if (filtroVendedor) {
             p.push(filtroVendedor);
             vendaWhere += ` AND vendedor_id = $${p.length}`;
@@ -40,8 +40,8 @@ router.get('/', auth_1.authMiddleware, auth_1.ownDataOnly, async (req, res) => {
             ${vendaWhere}
         `, p);
         // KPIs de Ruptura (ruptura não tem canal/segmentacao, usa só mes/ano/vendedor)
-        const rupturaParams = [mes, ano];
-        let rupturaWhere = 'WHERE mes_numero = $1 AND ano = $2';
+        const rupturaParams = [ano, mes];
+        let rupturaWhere = 'WHERE ano = $1 AND mes_numero = $2';
         if (filtroVendedor) {
             rupturaParams.push(filtroVendedor);
             rupturaWhere += ` AND vendedor_id = $${rupturaParams.length}`;
@@ -64,8 +64,8 @@ router.get('/', auth_1.authMiddleware, auth_1.ownDataOnly, async (req, res) => {
             ${filtroVendedor ? 'AND vendedor_id = $1' : ''}
         `, filtroVendedor ? [filtroVendedor] : []);
         // KPIs de Pedidos em Carteira
-        const pedidosParams = [mes, ano];
-        let pedidosWhere = 'WHERE mes_numero = $1 AND ano = $2';
+        const pedidosParams = [ano, mes];
+        let pedidosWhere = 'WHERE ano = $1 AND mes_numero = $2';
         if (filtroVendedor) {
             pedidosParams.push(filtroVendedor);
             pedidosWhere += ` AND vendedor_id = $${pedidosParams.length}`;
@@ -101,7 +101,7 @@ router.get('/', auth_1.authMiddleware, auth_1.ownDataOnly, async (req, res) => {
                 WHERE v.ativo = TRUE
                 GROUP BY v.id, v.nome, v.setor
                 ORDER BY valor_nf DESC
-            `, [mes, ano]);
+            `, [ano, mes]);
             vendasVendedor = vv.rows;
         }
         // Devedores resumo (não filtra por mes/ano — posição atual)
@@ -142,8 +142,7 @@ router.get('/tendencia', auth_1.authMiddleware, auth_1.ownDataOnly, async (req, 
         const refDate = new Date(now.getFullYear(), now.getMonth() - meses + 1, 1);
         const mesCorte = refDate.getMonth() + 1;
         const anoCorte = refDate.getFullYear();
-        const corte = anoCorte * 100 + mesCorte;
-        const p = [];
+        const p = [anoCorte, anoCorte, mesCorte];
         let extraWhere = '';
         if (filtroVendedor) {
             p.push(filtroVendedor);
@@ -158,7 +157,7 @@ router.get('/tendencia', auth_1.authMiddleware, auth_1.ownDataOnly, async (req, 
                 SUM(soma_litros)                AS litros,
                 COUNT(DISTINCT customer_number) AS clientes
             FROM vendas
-            WHERE (ano * 100 + mes_numero) >= ${corte}
+            WHERE (ano > $1 OR (ano = $2 AND mes_numero >= $3))
             ${extraWhere}
             GROUP BY mes_numero, ano, mes_descricao
             ORDER BY ano, mes_numero

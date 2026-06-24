@@ -12,10 +12,14 @@ router.get('/aliases/todos', authMiddleware, async (_req, res) => {
             SELECT v.id, v.codigo_vendedor, v.setor, v.territory_number, v.vendedor_alias,
                    v.nome, v.email, v.telefone, v.ativo,
                    (v.nome IS NOT NULL) AS preenchido,
-                   COUNT(DISTINCT c.customer_number) AS total_clientes
+                   COALESCE(cc.total_clientes, 0) AS total_clientes
             FROM vendedores v
-            LEFT JOIN clientes c ON c.vendedor_id = v.id AND c.status = 'C'
-            GROUP BY v.id
+            LEFT JOIN (
+                SELECT vendedor_id, COUNT(*) AS total_clientes
+                FROM clientes
+                WHERE status = 'C'
+                GROUP BY vendedor_id
+            ) cc ON cc.vendedor_id = v.id
             ORDER BY v.vendedor_alias
         `);
         res.json(rows.rows);
@@ -79,13 +83,16 @@ router.post('/', authMiddleware, async (req, res) => {
 router.get('/', authMiddleware, async (_req, res) => {
     try {
         const rows = await query(`
-            SELECT v.*, u.email,
-                   COUNT(DISTINCT c.customer_number) AS total_clientes
+            SELECT v.*, u.email, COALESCE(cc.total_clientes, 0) AS total_clientes
             FROM vendedores v
             LEFT JOIN usuarios u ON u.id = v.usuario_id
-            LEFT JOIN clientes c ON c.vendedor_id = v.id AND c.status = 'C'
+            LEFT JOIN (
+                SELECT vendedor_id, COUNT(*) AS total_clientes
+                FROM clientes
+                WHERE status = 'C'
+                GROUP BY vendedor_id
+            ) cc ON cc.vendedor_id = v.id
             WHERE v.ativo = TRUE
-            GROUP BY v.id, u.email
             ORDER BY v.nome
         `);
         res.json(rows.rows);

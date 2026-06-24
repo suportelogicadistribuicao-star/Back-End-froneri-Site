@@ -28,6 +28,7 @@ DB_NAME=erp_froneri
 DB_USER=root
 DB_PASSWORD=sua_senha
 DB_SSL=false
+DB_SLOW_QUERY_MS=1500
 
 JWT_SECRET=troque_este_segredo
 JWT_EXPIRES_IN=8h

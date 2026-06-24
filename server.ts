@@ -1,6 +1,6 @@
 import 'dotenv/config';
 import app from './src/app';
-import { testConnection } from './src/config/database';
+import { ensurePerformanceIndexes, testConnection } from './src/config/database';
 
 const PORT = parseInt(process.env.PORT || '8080');
 
@@ -10,6 +10,8 @@ async function start() {
         console.error('[FATAL] Não foi possível conectar ao banco de dados. Encerrando.');
         process.exit(1);
     }
+
+    await ensurePerformanceIndexes();
 
     app.listen(PORT, '0.0.0.0', () => {
         console.log(`[SERVER] ERP Froneri rodando na porta ${PORT}`);

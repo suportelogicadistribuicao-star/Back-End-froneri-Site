@@ -90,11 +90,15 @@ const rotRouter = express.Router();
 
 rotRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
     try {
-        const { vendedor_id, dia_semana } = req.query;
+        const { vendedor_id, dia_semana, page = 1, limit = 500 } = req.query;
         const fvId = req.filtroVendedor || vendedor_id;
         const params = [];
         const where = ['rot.ativa = TRUE'];
         let p = 1;
+
+        const pageNum = Math.max(Number(page) || 1, 1);
+        const limitNum = Math.min(Math.max(Number(limit) || 500, 1), 2000);
+        const offset = (pageNum - 1) * limitNum;
 
         if (fvId)      { where.push(`rot.vendedor_id = $${p++}`);   params.push(fvId); }
         if (dia_semana){ where.push(`rot.dia_semana = $${p++}`);    params.push(dia_semana); }
@@ -111,7 +115,8 @@ rotRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
             LEFT JOIN vendedores v ON v.id = rot.vendedor_id
             WHERE ${where.join(' AND ')}
             ORDER BY rot.dia_semana, rot.sequencia, c.customer_name
-        `, params);
+            LIMIT $${p++} OFFSET $${p++}
+        `, [...params, limitNum, offset]);
 
         res.json(rows.rows);
     } catch (err) {
