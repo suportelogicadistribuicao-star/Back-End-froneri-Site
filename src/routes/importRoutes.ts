@@ -2,7 +2,7 @@ import { Router } from 'express';
 import fs from 'fs';
 import { authMiddleware, requireRole } from '../middleware/auth';
 import upload from '../config/multer';
-import { importarRelatorioVendas } from '../services/importService';
+import { importarRelatorioVendas, iniciarImportacaoRelatorioVendas } from '../services/importService';
 import { query } from '../config/database';
 
 const router = Router();
@@ -16,23 +16,55 @@ const protegido = [authMiddleware, requireRole('admin', 'gerente')];
  */
 router.post('/vendas', ...protegido, upload.single('arquivo'), async (req, res) => {
     if (!req.file) return res.status(400).json({ erro: 'Nenhum arquivo enviado.' });
+    const sync = String(req.query.sync || '').toLowerCase() === 'true';
+    const uploadedFilePath = req.file.path;
 
     try {
-        const resultado = await importarRelatorioVendas(req.file.path, req.usuario.id);
-        res.json({
-            mensagem:   'Relatório de Vendas importado com sucesso.',
-            importacaoId: resultado.logId,
-            contadores:   resultado.contadores,
+        if (sync) {
+            const resultado = await importarRelatorioVendas(uploadedFilePath, req.usuario.id);
+            res.json({
+                mensagem: 'Relatório de Vendas importado com sucesso.',
+                importacaoId: resultado.logId,
+                contadores: resultado.contadores,
+            });
+            return;
+        }
+
+        const { logId, promise } = await iniciarImportacaoRelatorioVendas(uploadedFilePath, req.usuario.id);
+
+        promise
+            .then(() => {
+                console.log(`[import/vendas] Importação concluída. logId=${logId}`);
+            })
+            .catch((err) => {
+                console.error(`[import/vendas] Falha na importação em background. logId=${logId}`, err);
+            })
+            .finally(() => {
+                if (fs.existsSync(uploadedFilePath)) {
+                    fs.unlinkSync(uploadedFilePath);
+                }
+            });
+
+        return res.status(202).json({
+            mensagem: 'Importação iniciada. Acompanhe o status pelo histórico.',
+            importacaoId: logId,
+            status: 'processando',
         });
     } catch (err) {
         console.error('[import/vendas]', err);
         res.status(500).json({ erro: `Erro na importação: ${err.message}` });
     } finally {
-        // Remover arquivo temporário após processamento
-        if (req.file?.path && fs.existsSync(req.file.path)) {
-            fs.unlinkSync(req.file.path);
+        // No modo síncrono, remove arquivo ao final da requisição.
+        if (sync && fs.existsSync(uploadedFilePath)) {
+            fs.unlinkSync(uploadedFilePath);
         }
     }
+});
+
+router.get('/vendas', ...protegido, async (_req, res) => {
+    return res.status(405).json({
+        erro: 'Método não permitido. Use POST /api/import/vendas com multipart/form-data no campo "arquivo".',
+    });
 });
 
 /**

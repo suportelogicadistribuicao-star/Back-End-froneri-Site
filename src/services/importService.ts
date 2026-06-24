@@ -228,13 +228,14 @@ function col(row: Record<string, unknown>, ...names: string[]): unknown {
     return null;
 }
 
+const IMPORT_CHUNK_SIZE = parseInt(process.env.IMPORT_CHUNK_SIZE || '500', 10);
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // 1. IMPORTAR RELATÓRIO DE VENDAS (xlsb da Froneri)
 //    Ordem obrigatória: Base Ruptura → Base Vendas → Base Ordens Carteira
 //    Base Ruptura primeiro para garantir que clientes existam antes dos FKs.
 // ═══════════════════════════════════════════════════════════════════════════════
-async function importarRelatorioVendas(filePath, usuarioId) {
-    const logId = await criarLog(filePath, 'froneri_vendas', usuarioId);
+async function processarRelatorioVendas(filePath, usuarioId, logId) {
     await loadVendedoresMap();
 
     let contadores = {
@@ -255,48 +256,51 @@ async function importarRelatorioVendas(filePath, usuarioId) {
             await importarClientesDaBase(rupturaRows);
             contadores.clientes += rupturaRows.length;
 
-            await withTransaction(async (client) => {
-                for (const row of rupturaRows) {
-                    try {
-                        const customerNumber = normNum(row['Customer Number']);
-                        if (!customerNumber) continue;
+            for (let i = 0; i < rupturaRows.length; i += IMPORT_CHUNK_SIZE) {
+                const chunk = rupturaRows.slice(i, i + IMPORT_CHUNK_SIZE);
+                await withTransaction(async (client) => {
+                    for (const row of chunk) {
+                        try {
+                            const customerNumber = normNum(row['Customer Number']);
+                            if (!customerNumber) continue;
 
-                        const vendedorId = resolveVendedorId(
-                            norm(row['Description 2']),
-                            null,
-                            norm(row['Código'])
-                        );
+                            const vendedorId = resolveVendedorId(
+                                norm(row['Description 2']),
+                                null,
+                                norm(row['Código'])
+                            );
 
-                        // Só os campos que ESTA planilha fornece. Os campos de
-                        // tratamento (justificativa, observação, pedido em carteira,
-                        // data de cancelamento) NÃO vêm da planilha Froneri e por
-                        // isso não são tocados aqui — são mantidos via SQL/outras fontes.
-                        await client.query(`
-                            INSERT INTO ruptura (
-                                customer_number, vendedor_id, status_ruptura,
-                                mes_referencia, mes_numero, ano, importacao_id
-                            ) VALUES ($1,$2,$3,$4,$5,$6,$7)
-                            ON DUPLICATE KEY UPDATE
-                                vendedor_id    = VALUES(vendedor_id),
-                                status_ruptura = VALUES(status_ruptura),
-                                importacao_id  = VALUES(importacao_id),
-                                updated_at     = NOW()
-                        `, [
-                            customerNumber,
-                            vendedorId,
-                            norm(row['Nova Rup']) || 'Ruptura',
-                            periodoRelatorio.mesReferencia,
-                            periodoRelatorio.mes,
-                            periodoRelatorio.ano,
-                            logId
-                        ]);
-                        contadores.ruptura++;
-                    } catch (e) {
-                        contadores.erros++;
-                        errosLog.push(`Ruptura ${row['Customer Number']}: ${e.message}`);
+                            // Só os campos que ESTA planilha fornece. Os campos de
+                            // tratamento (justificativa, observação, pedido em carteira,
+                            // data de cancelamento) NÃO vêm da planilha Froneri e por
+                            // isso não são tocados aqui — são mantidos via SQL/outras fontes.
+                            await client.query(`
+                                INSERT INTO ruptura (
+                                    customer_number, vendedor_id, status_ruptura,
+                                    mes_referencia, mes_numero, ano, importacao_id
+                                ) VALUES ($1,$2,$3,$4,$5,$6,$7)
+                                ON DUPLICATE KEY UPDATE
+                                    vendedor_id    = VALUES(vendedor_id),
+                                    status_ruptura = VALUES(status_ruptura),
+                                    importacao_id  = VALUES(importacao_id),
+                                    updated_at     = NOW()
+                            `, [
+                                customerNumber,
+                                vendedorId,
+                                norm(row['Nova Rup']) || 'Ruptura',
+                                periodoRelatorio.mesReferencia,
+                                periodoRelatorio.mes,
+                                periodoRelatorio.ano,
+                                logId
+                            ]);
+                            contadores.ruptura++;
+                        } catch (e) {
+                            contadores.erros++;
+                            errosLog.push(`Ruptura ${row['Customer Number']}: ${e.message}`);
+                        }
                     }
-                }
-            });
+                });
+            }
         }
 
         // ── 1b. Base Vendas ──────────────────────────────────────────────────
@@ -305,9 +309,11 @@ async function importarRelatorioVendas(filePath, usuarioId) {
         // Devoluções têm caixas/litros/valores NEGATIVOS (vêm assim da planilha)
         // e são preservadas como tal.
         if (vendasRows.length > 0) {
-            await withTransaction(async (client) => {
-                for (const row of vendasRows) {
-                    try {
+            for (let i = 0; i < vendasRows.length; i += IMPORT_CHUNK_SIZE) {
+                const chunk = vendasRows.slice(i, i + IMPORT_CHUNK_SIZE);
+                await withTransaction(async (client) => {
+                    for (const row of chunk) {
+                        try {
                         const statusVenda = normStatusVenda(row['Status']);
 
                         const dataFat = normDate(row['Data Faturamento']);
@@ -396,24 +402,27 @@ async function importarRelatorioVendas(filePath, usuarioId) {
                         ]);
 
                         // Contadores por tipo
-                        if (statusVenda === 'VENDA')              contadores.vendas++;
-                        else if (statusVenda === 'AMOSTRA GRATIS') contadores.amostras++;
-                        else if (statusVenda === 'DEVOLUCAO')      contadores.devolucoes++;
-                        else                                       contadores.outros++;
-                    } catch (e) {
-                        contadores.erros++;
-                        errosLog.push(`Venda NF ${row['Número NF']} (${row['Status']}): ${e.message}`);
+                            if (statusVenda === 'VENDA')              contadores.vendas++;
+                            else if (statusVenda === 'AMOSTRA GRATIS') contadores.amostras++;
+                            else if (statusVenda === 'DEVOLUCAO')      contadores.devolucoes++;
+                            else                                       contadores.outros++;
+                        } catch (e) {
+                            contadores.erros++;
+                            errosLog.push(`Venda NF ${row['Número NF']} (${row['Status']}): ${e.message}`);
+                        }
                     }
-                }
-            });
+                });
+            }
         }
 
         // ── 1c. Base Ordens Carteira ─────────────────────────────────────────
         // Pode vir vazia em alguns meses; nesse caso simplesmente não há pedidos.
         if (pedidosRows.length > 0) {
-            await withTransaction(async (client) => {
-                for (const row of pedidosRows) {
-                    try {
+            for (let i = 0; i < pedidosRows.length; i += IMPORT_CHUNK_SIZE) {
+                const chunk = pedidosRows.slice(i, i + IMPORT_CHUNK_SIZE);
+                await withTransaction(async (client) => {
+                    for (const row of chunk) {
+                        try {
                         const orderDate  = normDate(row['Order Date']);
                         const mesDesc    = norm(col(row, 'Mês', 'Mes'));
                         const vendedorId = resolveVendedorId(
@@ -484,13 +493,14 @@ async function importarRelatorioVendas(filePath, usuarioId) {
                             norm(row['Status']),
                             logId
                         ]);
-                        contadores.pedidos++;
-                    } catch (e) {
-                        contadores.erros++;
-                        errosLog.push(`Pedido ${row['OrderNumber']}: ${e.message}`);
+                            contadores.pedidos++;
+                        } catch (e) {
+                            contadores.erros++;
+                            errosLog.push(`Pedido ${row['OrderNumber']}: ${e.message}`);
+                        }
                     }
-                }
-            });
+                });
+            }
         }
 
         await finalizarLog(logId, 'concluido', contadores, errosLog);
@@ -502,17 +512,30 @@ async function importarRelatorioVendas(filePath, usuarioId) {
     }
 }
 
+async function importarRelatorioVendas(filePath, usuarioId) {
+    const logId = await criarLog(filePath, 'froneri_vendas', usuarioId);
+    const resultado = await processarRelatorioVendas(filePath, usuarioId, logId);
+    return { ...resultado, logId };
+}
+
+async function iniciarImportacaoRelatorioVendas(filePath, usuarioId) {
+    const logId = await criarLog(filePath, 'froneri_vendas', usuarioId);
+    const promise = processarRelatorioVendas(filePath, usuarioId, logId);
+    return { logId, promise };
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // HELPER: Upsert clientes a partir da Base Ruptura (base completa de cadastro)
 // ═══════════════════════════════════════════════════════════════════════════════
 async function importarClientesDaBase(rows) {
-    await withTransaction(async (client) => {
-        for (const row of rows) {
-            const customerNumber = normNum(row['Customer Number'] || row['Sold'] || row['SOLD']);
-            if (!customerNumber) continue;
+    for (let i = 0; i < rows.length; i += IMPORT_CHUNK_SIZE) {
+        const chunk = rows.slice(i, i + IMPORT_CHUNK_SIZE);
+        await withTransaction(async (client) => {
+            for (const row of chunk) {
+                const customerNumber = normNum(row['Customer Number'] || row['Sold'] || row['SOLD']);
+                if (!customerNumber) continue;
 
-            try {
-                await client.query('SAVEPOINT sp_cliente');
+                try {
 
                 const description2   = norm(row['Description 2']);
                 const codigoSetor    = norm(row['Código'] || row['Codigo']);
@@ -600,13 +623,12 @@ async function importarClientesDaBase(rows) {
                     norm(row['Ruptura Garoto'])
                 ]);
 
-                await client.query('RELEASE SAVEPOINT sp_cliente');
-            } catch (e) {
-                await client.query('ROLLBACK TO SAVEPOINT sp_cliente');
-                console.warn('[importarClientes] Erro cliente:', customerNumber, '-', e.message);
+                } catch (e) {
+                    console.warn('[importarClientes] Erro cliente:', customerNumber, '-', e.message);
+                }
             }
-        }
-    });
+        });
+    }
 }
 
 // ─── Upsert produto ──────────────────────────────────────────────────────────
@@ -674,5 +696,6 @@ async function finalizarLog(logId, status, contadores, erros) {
 
 export {
     importarRelatorioVendas,
+    iniciarImportacaoRelatorioVendas,
     loadVendedoresMap,
 };
