@@ -61,6 +61,16 @@ npm run build
 npm start
 ```
 
+## Publicacao na KingHost (Node.js)
+
+Configuracao sugerida ao criar a aplicacao no painel:
+
+- Versao do Node.js: `18` ou `20` (LTS)
+- Diretorio: pasta onde os arquivos foram enviados (ex.: `app`)
+- Arquivo de inicializacao: `dist/server.js`
+
+Consulte `DEPLOY_KINGHOST.md` para o passo a passo completo e checklist de seguranca.
+
 ## Estrutura principal
 
 ```text
