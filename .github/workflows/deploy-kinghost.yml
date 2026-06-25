@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      APP_NODE_VERSION: 20.13.0
+      APP_NODE_VERSION: 24
       KINGHOST_SSH_HOST: ${{ secrets.KINGHOST_SSH_HOST }}
       KINGHOST_APP_RESTART_CMD: ${{ secrets.KINGHOST_APP_RESTART_CMD }}
 
@@ -59,6 +59,13 @@ jobs:
           EOF
           sed -i 's/^[[:space:]]*//' deploy/.env
 
+      - name: Normalizar diretório remoto
+        id: remote_dir
+        run: |
+          DIR="${{ secrets.KINGHOST_REMOTE_DIR }}"
+          DIR="${DIR%/}/"
+          echo "value=$DIR" >> "$GITHUB_OUTPUT"
+
       - name: Upload files via FTP
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
@@ -68,7 +75,7 @@ jobs:
           protocol: ftp
           port: ${{ secrets.KINGHOST_FTP_PORT || 21 }}
           local-dir: ./deploy/
-          server-dir: ${{ secrets.KINGHOST_REMOTE_DIR }}
+          server-dir: ${{ steps.remote_dir.outputs.value }}
 
       - name: Instalar dependências de produção no servidor
         if: ${{ env.KINGHOST_SSH_HOST != '' }}
@@ -79,7 +86,7 @@ jobs:
           key: ${{ secrets.KINGHOST_SSH_PRIVATE_KEY }}
           port: ${{ secrets.KINGHOST_SSH_PORT }}
           script: |
-            cd ${{ secrets.KINGHOST_REMOTE_DIR }}
+            cd ${{ steps.remote_dir.outputs.value }}
             if [ -s "$HOME/.nvm/nvm.sh" ]; then
               export NVM_DIR="$HOME/.nvm"
               . "$NVM_DIR/nvm.sh"
