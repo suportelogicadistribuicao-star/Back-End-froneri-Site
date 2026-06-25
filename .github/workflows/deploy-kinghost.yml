@@ -37,13 +37,13 @@ jobs:
       - name: Prepare deploy package
         run: |
           rm -rf deploy
-          mkdir -p deploy/dist
-          cp dist/server.js deploy/dist/server.js
+          mkdir -p deploy
+          cp dist/server.js deploy/server.js
           cp package.json deploy/package.json
 
       - name: Gerar .env de produção
         run: |
-          cat <<EOF > deploy/.env
+          cat > deploy/.env <<EOF
           NODE_ENV=production
           DB_HOST=${{ secrets.DB_HOST }}
           DB_PORT=${{ secrets.DB_PORT }}
@@ -55,6 +55,7 @@ jobs:
           JWT_EXPIRES_IN=${{ secrets.JWT_EXPIRES_IN }}
           CORS_ORIGIN=${{ secrets.CORS_ORIGIN }}
           EOF
+          sed -i 's/^[[:space:]]*//' deploy/.env
 
       - name: Upload files via FTP
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5

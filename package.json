@@ -2,10 +2,10 @@
   "name": "erp-froneri-backend",
   "version": "1.0.0",
   "description": "Backend ERP Froneri - Broker Lógica",
-  "main": "dist/server.js",
+  "main": "server.js",
   "scripts": {
     "build": "node build.mjs",
-    "start": "node dist/server.js",
+    "start": "node server.js",
     "dev": "nodemon --watch . --ext ts --exec ts-node --files ./server.ts",
     "migrate": "node dist/src/scripts/migrate.js",
     "seed": "node dist/src/scripts/seed.js"
