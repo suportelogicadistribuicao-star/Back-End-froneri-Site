@@ -15,6 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      APP_NODE_VERSION: 20.13.0
       KINGHOST_SSH_HOST: ${{ secrets.KINGHOST_SSH_HOST }}
       KINGHOST_APP_RESTART_CMD: ${{ secrets.KINGHOST_APP_RESTART_CMD }}
 
@@ -25,7 +26,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: ${{ env.APP_NODE_VERSION }}
           cache: npm
 
       - name: Install dependencies
@@ -79,7 +80,12 @@ jobs:
           port: ${{ secrets.KINGHOST_SSH_PORT }}
           script: |
             cd ${{ secrets.KINGHOST_REMOTE_DIR }}
-            npm ci --omit=dev
+            if [ -s "$HOME/.nvm/nvm.sh" ]; then
+              export NVM_DIR="$HOME/.nvm"
+              . "$NVM_DIR/nvm.sh"
+              nvm use ${{ env.APP_NODE_VERSION }} || nvm use 20
+            fi
+            npm ci --omit=dev || npm install --omit=dev
 
       - name: Restart Node app over SSH
         if: ${{ env.KINGHOST_SSH_HOST != '' && env.KINGHOST_APP_RESTART_CMD != '' }}
