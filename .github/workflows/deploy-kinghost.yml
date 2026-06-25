@@ -29,17 +29,18 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
-      - name: Build (bundle com esbuild)
+      - name: Build (TypeScript → JavaScript, estrutura preservada)
         run: npm run build
 
       - name: Prepare deploy package
         run: |
           rm -rf deploy
           mkdir -p deploy
-          cp dist/server.js deploy/server.js
+          cp -r dist/. deploy/
           cp package.json deploy/package.json
+          cp package-lock.json deploy/package-lock.json
 
       - name: Gerar .env de produção
         run: |
@@ -67,6 +68,18 @@ jobs:
           port: ${{ secrets.KINGHOST_FTP_PORT || 21 }}
           local-dir: ./deploy/
           server-dir: ${{ secrets.KINGHOST_REMOTE_DIR }}
+
+      - name: Instalar dependências de produção no servidor
+        if: ${{ env.KINGHOST_SSH_HOST != '' }}
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.KINGHOST_SSH_HOST }}
+          username: ${{ secrets.KINGHOST_SSH_USER }}
+          key: ${{ secrets.KINGHOST_SSH_PRIVATE_KEY }}
+          port: ${{ secrets.KINGHOST_SSH_PORT }}
+          script: |
+            cd ${{ secrets.KINGHOST_REMOTE_DIR }}
+            npm ci --omit=dev
 
       - name: Restart Node app over SSH
         if: ${{ env.KINGHOST_SSH_HOST != '' && env.KINGHOST_APP_RESTART_CMD != '' }}
