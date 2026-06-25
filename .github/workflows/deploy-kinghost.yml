@@ -14,6 +14,9 @@ jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      KINGHOST_SSH_HOST: ${{ secrets.KINGHOST_SSH_HOST }}
+      KINGHOST_APP_RESTART_CMD: ${{ secrets.KINGHOST_APP_RESTART_CMD }}
 
     steps:
       - name: Checkout
@@ -51,7 +54,7 @@ jobs:
           server-dir: ${{ secrets.KINGHOST_REMOTE_DIR }}
 
       - name: Install production dependencies over SSH
-        if: ${{ secrets.KINGHOST_SSH_HOST != '' }}
+        if: ${{ env.KINGHOST_SSH_HOST != '' }}
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.KINGHOST_SSH_HOST }}
@@ -63,7 +66,7 @@ jobs:
             npm install --omit=dev
 
       - name: Restart Node app over SSH
-        if: ${{ secrets.KINGHOST_SSH_HOST != '' && secrets.KINGHOST_APP_RESTART_CMD != '' }}
+        if: ${{ env.KINGHOST_SSH_HOST != '' && env.KINGHOST_APP_RESTART_CMD != '' }}
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.KINGHOST_SSH_HOST }}
