@@ -14,9 +14,6 @@ jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      KINGHOST_SSH_HOST: ${{ secrets.KINGHOST_SSH_HOST }}
-      KINGHOST_APP_RESTART_CMD: ${{ secrets.KINGHOST_APP_RESTART_CMD }}
 
     steps:
       - name: Checkout
@@ -41,6 +38,21 @@ jobs:
           cp dist/server.js deploy/dist/server.js
           cp package.json deploy/package.json
 
+      - name: Gerar .env de produção
+        run: |
+          cat <<EOF > deploy/.env
+          NODE_ENV=production
+          DB_HOST=${{ secrets.DB_HOST }}
+          DB_PORT=${{ secrets.DB_PORT }}
+          DB_NAME=${{ secrets.DB_NAME }}
+          DB_USER=${{ secrets.DB_USER }}
+          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+          DB_SSL=${{ secrets.DB_SSL }}
+          JWT_SECRET=${{ secrets.JWT_SECRET }}
+          JWT_EXPIRES_IN=${{ secrets.JWT_EXPIRES_IN }}
+          CORS_ORIGIN=${{ secrets.CORS_ORIGIN }}
+          EOF
+
       - name: Upload files via FTP
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
         with:
@@ -53,7 +65,7 @@ jobs:
           server-dir: ${{ secrets.KINGHOST_REMOTE_DIR }}
 
       - name: Restart Node app over SSH
-        if: ${{ env.KINGHOST_SSH_HOST != '' && env.KINGHOST_APP_RESTART_CMD != '' }}
+        if: ${{ secrets.KINGHOST_SSH_HOST != '' && secrets.KINGHOST_APP_RESTART_CMD != '' }}
         uses: appleboy/ssh-action@v1.2.0
         with:
           host: ${{ secrets.KINGHOST_SSH_HOST }}
