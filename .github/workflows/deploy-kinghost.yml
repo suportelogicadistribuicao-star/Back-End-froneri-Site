@@ -31,16 +31,15 @@ jobs:
       - name: Install dependencies
         run: npm install
 
-      - name: Build
+      - name: Build (bundle com esbuild)
         run: npm run build
 
       - name: Prepare deploy package
         run: |
           rm -rf deploy
-          mkdir -p deploy
-          cp package.json deploy/
-          cp package-lock.json deploy/
-          cp -r dist deploy/
+          mkdir -p deploy/dist
+          cp dist/server.js deploy/dist/server.js
+          cp package.json deploy/package.json
 
       - name: Upload files via FTP
         uses: SamKirkland/FTP-Deploy-Action@v4.3.5
@@ -52,18 +51,6 @@ jobs:
           port: ${{ secrets.KINGHOST_FTP_PORT || 21 }}
           local-dir: ./deploy/
           server-dir: ${{ secrets.KINGHOST_REMOTE_DIR }}
-
-      - name: Install production dependencies over SSH
-        if: ${{ env.KINGHOST_SSH_HOST != '' }}
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.KINGHOST_SSH_HOST }}
-          username: ${{ secrets.KINGHOST_SSH_USER }}
-          key: ${{ secrets.KINGHOST_SSH_PRIVATE_KEY }}
-          port: ${{ secrets.KINGHOST_SSH_PORT || 22 }}
-          script: |
-            cd ${{ secrets.KINGHOST_REMOTE_DIR }}
-            npm install --omit=dev
 
       - name: Restart Node app over SSH
         if: ${{ env.KINGHOST_SSH_HOST != '' && env.KINGHOST_APP_RESTART_CMD != '' }}
