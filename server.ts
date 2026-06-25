@@ -2,7 +2,13 @@ import 'dotenv/config';
 import app from './src/app';
 import { ensurePerformanceIndexes, testConnection } from './src/config/database';
 
-const PORT = parseInt(process.env.PORT || '8080');
+// KingHost expõe a porta como PORT_<NOME_DO_SCRIPT> (ex: PORT_SERVER se o script é server.js)
+// Consulte o painel Node.JS da KingHost ou ~/.bash_node para confirmar o nome exato
+const PORT = parseInt(
+    process.env.PORT_SERVER ||   // KingHost: ajuste se o script tiver outro nome no painel
+    process.env.PORT       ||   // fallback genérico
+    '8080'
+);
 
 async function start() {
     const dbOk = await testConnection();
