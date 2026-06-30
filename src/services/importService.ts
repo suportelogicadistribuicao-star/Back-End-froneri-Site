@@ -18,35 +18,50 @@ import fs from 'fs';
 import { randomUUID } from 'crypto';
 import { withTransaction, query } from '../config/database';
 
-// ─── Mapa de Vendedores por descrição/território ─────────────────────────────
-let vendedoresMap = {};  // key: "territorio" | "setor" | "alias" | "codigo" → vendedor_id
+type VendedoresMap = Record<string, number>;
 
-async function loadVendedoresMap() {
+// ─── Mapa de Vendedores por descrição/território ─────────────────────────────
+// Retorna um mapa local — cada invocação cria seu próprio objeto para evitar
+// race condition quando duas importações ocorrem em paralelo.
+async function loadVendedoresMap(): Promise<VendedoresMap> {
     const res = await query(
         'SELECT id, codigo_vendedor, setor, territory_number, vendedor_alias FROM vendedores WHERE ativo = TRUE'
     );
-    vendedoresMap = {};
+    const map: VendedoresMap = {};
     for (const row of res.rows) {
-        if (row.territory_number) vendedoresMap[String(row.territory_number)] = row.id;
-        if (row.setor)            vendedoresMap[row.setor.toUpperCase()]       = row.id;
-        if (row.vendedor_alias)   vendedoresMap[row.vendedor_alias.trim()]     = row.id;
-        if (row.codigo_vendedor)  vendedoresMap[String(row.codigo_vendedor)]   = row.id;
+        if (row.territory_number) map[String(row.territory_number)] = row.id;
+        if (row.setor)            map[row.setor.toUpperCase()]       = row.id;
+        if (row.vendedor_alias)   map[row.vendedor_alias.trim()]     = row.id;
+        if (row.codigo_vendedor)  map[String(row.codigo_vendedor)]   = row.id;
     }
-    return vendedoresMap;
+    console.log(`[import] Mapa de vendedores carregado: ${Object.keys(map).length} entradas`);
+    return map;
 }
 
 // ─── Helper: resolver vendedor_id a partir de vários campos ──────────────────
-function resolveVendedorId(description2, vendedorDesc, codigoSetor) {
-    if (description2 && vendedoresMap[String(description2)]) return vendedoresMap[String(description2)];
-    if (codigoSetor   && vendedoresMap[codigoSetor.toUpperCase()]) return vendedoresMap[codigoSetor.toUpperCase()];
-    if (vendedorDesc  && vendedoresMap[vendedorDesc.trim()])  return vendedoresMap[vendedorDesc.trim()];
+function resolveVendedorId(
+    map: VendedoresMap,
+    description2: string | null,
+    vendedorDesc: string | null,
+    codigoSetor: string | null,
+): number | null {
+    if (description2 && map[String(description2)]) return map[String(description2)];
+    if (codigoSetor   && map[codigoSetor.toUpperCase()]) return map[codigoSetor.toUpperCase()];
+    if (vendedorDesc  && map[vendedorDesc.trim()])  return map[vendedorDesc.trim()];
     return null;
 }
 
 // ─── Helpers de normalização ─────────────────────────────────────────────────
-const norm = v => (v === null || v === undefined || v === '' || (typeof v === 'number' && isNaN(v))) ? null : String(v).trim();
+const norm = (v: unknown): string | null =>
+    (v === null || v === undefined || v === '' || (typeof v === 'number' && isNaN(v)))
+        ? null
+        : String(v).trim();
+
 // Froneri usa "Blank" como placeholder para campos sem descrição no JDE — tratar como null.
-const normDesc = v => { const s = norm(v); return (s === 'Blank' || s === 'blank') ? null : s; };
+const normDesc = (v: unknown): string | null => {
+    const s = norm(v);
+    return (s === 'Blank' || s === 'blank') ? null : s;
+};
 
 // Status do CLIENTE (Base Ruptura). A Froneri usa 'C', 'I', 'S' e também 'CI'
 // (Cliente Inativo). O schema de clientes.status só aceita C/I/S, então 'CI'
@@ -69,42 +84,54 @@ const normStatusVenda = (v: unknown): 'VENDA' | 'AMOSTRA GRATIS' | 'DEVOLUCAO' |
     return 'OUTRO';
 };
 
-const normNum = v => {
+const normNum = (v: unknown): number | null => {
     if (v === null || v === undefined || v === '') return null;
-    const n = parseFloat(v);
+    const n = parseFloat(String(v));
     return isNaN(n) ? null : n;
 };
-const normDate = v => {
+
+const normDate = (v: unknown): string | null => {
     if (!v) return null;
+    // xlsx com cellDates:true + raw:true entrega Date objects para colunas de data.
     if (v instanceof Date) return isNaN(v.getTime()) ? null : v.toISOString().split('T')[0];
+    // Serial numérico do Excel (raw:true em células sem cellDates).
     if (typeof v === 'number') {
         const d = new Date(Math.round((v - 25569) * 86400 * 1000));
         return isNaN(d.getTime()) ? null : d.toISOString().split('T')[0];
     }
-    const parsed = new Date(v);
+    const s = String(v).trim();
+    // Formato brasileiro DD/MM/YYYY — comum em planilhas Froneri com raw:false legado.
+    const dmyMatch = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(s);
+    if (dmyMatch) {
+        const d = new Date(Date.UTC(Number(dmyMatch[3]), Number(dmyMatch[2]) - 1, Number(dmyMatch[1])));
+        return isNaN(d.getTime()) ? null : d.toISOString().split('T')[0];
+    }
+    // ISO 8601 e outros formatos reconhecidos pelo engine V8.
+    const parsed = new Date(s);
     return isNaN(parsed.getTime()) ? null : parsed.toISOString().split('T')[0];
 };
 
-// ─── Extrair mês/ano de uma data ─────────────────────────────────────────────
-function getMesAno(dateStr) {
+// ─── Extrair mês/ano UTC de uma data ISO ─────────────────────────────────────
+// Usa getUTC* para evitar off-by-one em servidores com fuso negativo (UTC-X).
+function getMesAno(dateStr: string | null): { mes: number | null; ano: number | null } {
     if (!dateStr) return { mes: null, ano: null };
     const d = new Date(dateStr);
     if (isNaN(d.getTime())) return { mes: null, ano: null };
-    return { mes: d.getMonth() + 1, ano: d.getFullYear() };
+    return { mes: d.getUTCMonth() + 1, ano: d.getUTCFullYear() };
 }
 
-const MESES_MAP = {
+const MESES_MAP: Record<string, number> = {
     'janeiro': 1, 'fevereiro': 2, 'março': 3, 'marco': 3,
     'abril': 4, 'maio': 5, 'junho': 6, 'julho': 7, 'agosto': 8,
     'setembro': 9, 'outubro': 10, 'novembro': 11, 'dezembro': 12
 };
 
-function parseMesDescricao(mesDesc) {
+function parseMesDescricao(mesDesc: string | null): number | null {
     if (!mesDesc) return null;
     return MESES_MAP[mesDesc.toLowerCase().trim()] || null;
 }
 
-function formatMesReferencia(mes, ano) {
+function formatMesReferencia(mes: number | null, ano: number | null): string | null {
     if (!mes || !ano) return null;
     return `${String(mes).padStart(2, '0')}/${ano}`;
 }
@@ -172,7 +199,11 @@ function pickPeriodoFromFileName(filePath: string) {
     return null;
 }
 
-function inferPeriodoRelatorio(filePath: string, vendasRows: Record<string, unknown>[], pedidosRows: Record<string, unknown>[]) {
+function inferPeriodoRelatorio(
+    filePath: string,
+    vendasRows: Record<string, unknown>[],
+    pedidosRows: Record<string, unknown>[],
+) {
     const periodoVendas = pickPeriodoFromRows(vendasRows, ['Data Faturamento'], ['Mês Descrição']);
     if (periodoVendas) return periodoVendas;
 
@@ -183,6 +214,7 @@ function inferPeriodoRelatorio(filePath: string, vendasRows: Record<string, unkn
     if (periodoArquivo) return { ...periodoArquivo, total: 0 };
 
     const hoje = new Date();
+    console.warn('[import] Período não inferido das abas nem do nome do arquivo — usando data de hoje como fallback');
     return {
         mes: hoje.getMonth() + 1,
         ano: hoje.getFullYear(),
@@ -192,8 +224,9 @@ function inferPeriodoRelatorio(filePath: string, vendasRows: Record<string, unkn
 }
 
 // ─── Ler planilha com xlsx ────────────────────────────────────────────────────
-function readWorkbook(filePath) {
+function readWorkbook(filePath: string) {
     const ext = path.extname(filePath).toLowerCase();
+    // cellDates:true converte seriais numéricos em Date objects.
     const opts = { type: 'buffer' as const, cellDates: true };
     const buffer = fs.readFileSync(filePath);
     if (ext === '.xlsb') {
@@ -213,14 +246,17 @@ function normalizeKeys(rows: Record<string, unknown>[]): Record<string, unknown>
     });
 }
 
-function sheetToRows(wb, sheetName) {
+function sheetToRows(wb: any, sheetName: string): Record<string, unknown>[] {
     const ws = wb.Sheets[sheetName];
     if (!ws) return [];
-    const rows = XLSX.utils.sheet_to_json(ws, { defval: null, raw: false }) as Record<string, unknown>[];
+    // raw:true preserva tipos nativos: números como number, datas como Date (via cellDates:true).
+    // raw:false formata tudo como string usando o formato da célula, corrompendo Customer Number
+    // (e.g. 12345 → "12,345") e impedindo que normDate receba Date objects.
+    const rows = XLSX.utils.sheet_to_json(ws, { defval: null, raw: true }) as Record<string, unknown>[];
     return normalizeKeys(rows);
 }
 
-function normalizeSheetName(name: string) {
+function normalizeSheetName(name: string): string {
     return String(name || '')
         .normalize('NFD')
         .replace(/[̀-ͯ]/g, '')
@@ -229,7 +265,7 @@ function normalizeSheetName(name: string) {
         .toLowerCase();
 }
 
-function findSheetName(wb: any, expected: string, aliases: string[] = []) {
+function findSheetName(wb: any, expected: string, aliases: string[] = []): string | null {
     const names = Object.keys(wb?.Sheets || {});
     const candidates = [expected, ...aliases].map(normalizeSheetName);
 
@@ -243,7 +279,7 @@ function findSheetName(wb: any, expected: string, aliases: string[] = []) {
 
 function sheetToRowsFlexible(wb: any, expected: string, aliases: string[] = []) {
     const realName = findSheetName(wb, expected, aliases);
-    if (!realName) return { rows: [], sheetName: null as string | null };
+    if (!realName) return { rows: [] as Record<string, unknown>[], sheetName: null as string | null };
     return { rows: sheetToRows(wb, realName), sheetName: realName };
 }
 
@@ -275,26 +311,26 @@ function bulkSql(table: string, cols: string[], rowCount: number, onDup: string)
 //    Ordem obrigatória: Base Ruptura → Base Vendas → Base Ordens Carteira
 //    Base Ruptura primeiro para garantir que clientes existam antes dos FKs.
 // ═══════════════════════════════════════════════════════════════════════════════
-async function processarRelatorioVendas(filePath, usuarioId, logId) {
-    await loadVendedoresMap();
+async function processarRelatorioVendas(filePath: string, _usuarioId: string, logId: string) {
+    // Mapa local por invocação — duas importações simultâneas não compartilham estado.
+    const vendedoresMap = await loadVendedoresMap();
 
-    let contadores = {
+    const contadores = {
         vendas: 0, amostras: 0, devolucoes: 0, outros: 0,
-        pedidos: 0, ruptura: 0, clientes: 0, erros: 0
+        pedidos: 0, ruptura: 0, clientes: 0, erros: 0,
     };
-    const errosLog = [];
+    const errosLog: string[] = [];
 
     try {
         const wb = readWorkbook(filePath);
-        const vendasSheet = sheetToRowsFlexible(wb, 'Base Vendas', ['Base vendas', 'Vendas']);
+        const vendasSheet  = sheetToRowsFlexible(wb, 'Base Vendas', ['Base vendas', 'Vendas']);
         const pedidosSheet = sheetToRowsFlexible(wb, 'Base Ordens Carteira', ['Base Ordens de Carteira', 'Ordens Carteira']);
         const rupturaSheet = sheetToRowsFlexible(wb, 'Base Ruptura', ['Ruptura', 'Base ruptura']);
 
-        const vendasRows = vendasSheet.rows;
+        const vendasRows  = vendasSheet.rows;
         const pedidosRows = pedidosSheet.rows;
-        const periodoRelatorio = inferPeriodoRelatorio(filePath, vendasRows, pedidosRows);
-
         const rupturaRows = rupturaSheet.rows;
+        const periodoRelatorio = inferPeriodoRelatorio(filePath, vendasRows, pedidosRows);
 
         if (vendasRows.length === 0 && pedidosRows.length === 0 && rupturaRows.length === 0) {
             const disponiveis = Object.keys(wb?.Sheets || {}).join(', ');
@@ -309,12 +345,18 @@ async function processarRelatorioVendas(filePath, usuarioId, logId) {
             vendas: vendasSheet.sheetName,
             pedidos: pedidosSheet.sheetName,
             linhas: { ruptura: rupturaRows.length, vendas: vendasRows.length, pedidos: pedidosRows.length },
+            periodo: `${periodoRelatorio.mes}/${periodoRelatorio.ano}`,
         });
 
         // ── 1a. Base Ruptura — PRIMEIRO (popula clientes) ─────────────────────
         if (rupturaRows.length > 0) {
-            await importarClientesDaBase(rupturaRows);
-            contadores.clientes += rupturaRows.length;
+            // importarClientesDaBase retorna erros ao invés de swallowá-los.
+            const clienteResult = await importarClientesDaBase(rupturaRows, vendedoresMap);
+            contadores.clientes += clienteResult.clientesInseridos;
+            if (clienteResult.erros.length > 0) {
+                contadores.erros += clienteResult.erros.length;
+                errosLog.push(...clienteResult.erros);
+            }
 
             const RUPTURA_COLS = [
                 'customer_number', 'vendedor_id', 'status_ruptura',
@@ -330,11 +372,16 @@ async function processarRelatorioVendas(filePath, usuarioId, logId) {
                 const chunk = rupturaRows.slice(i, i + IMPORT_CHUNK_SIZE);
                 const params: unknown[] = [];
                 let rowCount = 0;
+                let skipped = 0;
 
                 for (const row of chunk) {
                     const customerNumber = normNum(row['Customer Number']);
-                    if (!customerNumber) continue;
-                    const vendedorId = resolveVendedorId(norm(row['Description 2']), null, norm(row['Código']));
+                    if (!customerNumber) { skipped++; continue; }
+
+                    const vendedorId = resolveVendedorId(vendedoresMap, norm(row['Description 2']), null, norm(row['Código']));
+                    if (!vendedorId) {
+                        console.warn(`[import/ruptura] Vendedor não encontrado — Description2="${row['Description 2']}" Código="${row['Código']}" customer=${customerNumber}`);
+                    }
                     params.push(
                         customerNumber, vendedorId,
                         norm(row['Nova Rup']) || 'Ruptura',
@@ -345,13 +392,19 @@ async function processarRelatorioVendas(filePath, usuarioId, logId) {
                     rowCount++;
                 }
 
+                if (skipped > 0) {
+                    console.warn(`[import/ruptura] chunk ${i}: ${skipped} linha(s) sem Customer Number ignorada(s)`);
+                }
                 if (rowCount === 0) continue;
+
                 try {
                     await query(bulkSql('ruptura', RUPTURA_COLS, rowCount, RUPTURA_ON_DUP), params);
                     contadores.ruptura += rowCount;
-                } catch (e) {
+                    console.log(`[import/ruptura] chunk ${i}: ${rowCount} registro(s) inserido(s)`);
+                } catch (e: any) {
                     contadores.erros += rowCount;
                     errosLog.push(`Ruptura chunk ${i}: ${e.message}`);
+                    console.error(`[import/ruptura] Erro no chunk ${i}:`, e.message);
                 }
             }
         }
@@ -393,39 +446,73 @@ async function processarRelatorioVendas(filePath, usuarioId, logId) {
                 'valor_nf=VALUES(valor_nf),' +
                 'valor_vbc=VALUES(valor_vbc)';
 
+            // Deduplica produtos em toda a base antes dos chunks — evita o mesmo produto
+            // ser UPSERTado repetidamente em cada chunk que o contenha.
+            const produtosMap = new Map<string, unknown[]>();
+            for (const row of vendasRows) {
+                const codItem = norm(row['COD_ITEM']);
+                if (codItem && !produtosMap.has(codItem)) {
+                    produtosMap.set(codItem, [
+                        codItem,
+                        norm(row['Descrição Produto']),
+                        norm(row['CATEGORIA']),
+                        norm(row['SUBCATEGORIA']),
+                        norm(row['Segmento SKU']),
+                        norm(row['Categoria TOTAL SKU']),
+                    ]);
+                }
+            }
+
+            if (produtosMap.size > 0) {
+                const produtosArr = [...produtosMap.values()];
+                for (let i = 0; i < produtosArr.length; i += IMPORT_CHUNK_SIZE) {
+                    const prodChunk = produtosArr.slice(i, i + IMPORT_CHUNK_SIZE);
+                    try {
+                        await query(
+                            bulkSql('produtos', PRODUTO_COLS, prodChunk.length, PRODUTO_ON_DUP),
+                            prodChunk.flat(),
+                        );
+                    } catch (e: any) {
+                        errosLog.push(`Produtos chunk ${i}: ${e.message}`);
+                        console.error(`[import/produtos] Erro no chunk ${i}:`, e.message);
+                    }
+                }
+                console.log(`[import/vendas] ${produtosMap.size} produto(s) único(s) processado(s)`);
+            }
+
             for (let i = 0; i < vendasRows.length; i += IMPORT_CHUNK_SIZE) {
                 const chunk = vendasRows.slice(i, i + IMPORT_CHUNK_SIZE);
 
-                const produtosMap = new Map<string, unknown[]>();
                 const cliParams: unknown[] = [];
                 const vendaParams: unknown[] = [];
                 let chunkVendas = 0, chunkAmostras = 0, chunkDevolucoes = 0, chunkOutros = 0;
+                let skipped = 0;
 
                 for (const row of chunk) {
+                    const customerNumber = normNum(row['Customer Number']);
+                    if (!customerNumber) {
+                        skipped++;
+                        continue;
+                    }
+
                     const statusVenda = normStatusVenda(row['Status']);
                     const dataFat = normDate(row['Data Faturamento']);
                     const { mes, ano } = getMesAno(dataFat);
                     const mesDesc = norm(row['Mês Descrição']);
                     const vendedorId = resolveVendedorId(
+                        vendedoresMap,
                         norm(row['Description 2']),
                         norm(row['Vendedor.Description']),
                         null,
                     );
-
-                    const codItem = norm(row['COD_ITEM']);
-                    if (codItem && !produtosMap.has(codItem)) {
-                        produtosMap.set(codItem, [
-                            codItem,
-                            norm(row['Descrição Produto']),
-                            norm(row['CATEGORIA']),
-                            norm(row['SUBCATEGORIA']),
-                            norm(row['Segmento SKU']),
-                            norm(row['Categoria TOTAL SKU']),
-                        ]);
+                    if (!vendedorId) {
+                        console.warn(`[import/vendas] Vendedor não encontrado — Description2="${row['Description 2']}" customer=${customerNumber}`);
                     }
 
+                    const codItem = norm(row['COD_ITEM']);
+
                     cliParams.push(
-                        normNum(row['Customer Number']),
+                        customerNumber,
                         norm(row['Customer Name']),
                         norm(row['CNPJ']),
                         norm(row['City']),
@@ -437,7 +524,7 @@ async function processarRelatorioVendas(filePath, usuarioId, logId) {
                     );
 
                     vendaParams.push(
-                        normNum(row['Customer Number']),
+                        customerNumber,
                         norm(row['Customer Name']),
                         vendedorId,
                         norm(row['Vendedor.Description']),
@@ -468,38 +555,38 @@ async function processarRelatorioVendas(filePath, usuarioId, logId) {
                         logId,
                     );
 
-                    if (statusVenda === 'VENDA')              chunkVendas++;
+                    if (statusVenda === 'VENDA')               chunkVendas++;
                     else if (statusVenda === 'AMOSTRA GRATIS') chunkAmostras++;
                     else if (statusVenda === 'DEVOLUCAO')      chunkDevolucoes++;
                     else                                       chunkOutros++;
                 }
 
+                const rowCount = chunkVendas + chunkAmostras + chunkDevolucoes + chunkOutros;
+                if (skipped > 0) {
+                    console.warn(`[import/vendas] chunk ${i}: ${skipped} linha(s) sem Customer Number ignorada(s)`);
+                }
+                if (rowCount === 0) continue;
+
                 try {
                     await withTransaction(async (client) => {
-                        if (produtosMap.size > 0) {
-                            await client.query(
-                                bulkSql('produtos', PRODUTO_COLS, produtosMap.size, PRODUTO_ON_DUP),
-                                [...produtosMap.values()].flat(),
-                            );
-                        }
-                        if (chunk.length > 0) {
-                            await client.query(
-                                bulkSql('clientes', CLI_VENDAS_COLS, chunk.length, CLI_VENDAS_ON_DUP),
-                                cliParams,
-                            );
-                            await client.query(
-                                bulkSql('vendas', VENDA_COLS, chunk.length, VENDA_ON_DUP),
-                                vendaParams,
-                            );
-                        }
+                        await client.query(
+                            bulkSql('clientes', CLI_VENDAS_COLS, rowCount, CLI_VENDAS_ON_DUP),
+                            cliParams,
+                        );
+                        await client.query(
+                            bulkSql('vendas', VENDA_COLS, rowCount, VENDA_ON_DUP),
+                            vendaParams,
+                        );
                     });
-                    contadores.vendas    += chunkVendas;
-                    contadores.amostras  += chunkAmostras;
+                    contadores.vendas     += chunkVendas;
+                    contadores.amostras   += chunkAmostras;
                     contadores.devolucoes += chunkDevolucoes;
-                    contadores.outros    += chunkOutros;
-                } catch (e) {
-                    contadores.erros += chunk.length;
+                    contadores.outros     += chunkOutros;
+                    console.log(`[import/vendas] chunk ${i}: ${rowCount} registro(s) (V=${chunkVendas} A=${chunkAmostras} D=${chunkDevolucoes} O=${chunkOutros})`);
+                } catch (e: any) {
+                    contadores.erros += rowCount;
                     errosLog.push(`Vendas chunk ${i}: ${e.message}`);
+                    console.error(`[import/vendas] Erro no chunk ${i}:`, e.message);
                 }
             }
         }
@@ -547,10 +634,18 @@ async function processarRelatorioVendas(filePath, usuarioId, logId) {
                     const orderDate = normDate(row['Order Date']);
                     const mesDesc = norm(col(row, 'Mês', 'Mes'));
                     const vendedorId = resolveVendedorId(
+                        vendedoresMap,
                         norm(row['Description 2']),
                         norm(row['Vendedor.Description']),
                         null,
                     );
+                    if (!vendedorId) {
+                        console.warn(`[import/pedidos] Vendedor não encontrado — Description2="${row['Description 2']}"`);
+                    }
+                    // Extrai ano diretamente da string ISO para evitar dependência de fuso horário.
+                    const ano = orderDate
+                        ? parseInt(orderDate.substring(0, 4), 10)
+                        : new Date().getUTCFullYear();
                     params.push(
                         normNum(col(row, 'Ship To Number', 'Customer Number')),
                         norm(col(row, 'Alpha Name', 'Customer Name')),
@@ -571,7 +666,7 @@ async function processarRelatorioVendas(filePath, usuarioId, logId) {
                         norm(col(row, 'Categoria TOTAL', 'Categoria TOTAL SKU')),
                         mesDesc,
                         parseMesDescricao(mesDesc),
-                        orderDate ? new Date(orderDate).getFullYear() : new Date().getFullYear(),
+                        ano,
                         norm(row['Hierarquia']),
                         norm(row['Canal Cliente']),
                         norm(row['Filial']),
@@ -583,29 +678,37 @@ async function processarRelatorioVendas(filePath, usuarioId, logId) {
                 try {
                     await query(bulkSql('pedidos_carteira', PEDIDO_COLS, chunk.length, PEDIDO_ON_DUP), params);
                     contadores.pedidos += chunk.length;
-                } catch (e) {
+                    console.log(`[import/pedidos] chunk ${i}: ${chunk.length} registro(s) inserido(s)`);
+                } catch (e: any) {
                     contadores.erros += chunk.length;
                     errosLog.push(`Pedidos chunk ${i}: ${e.message}`);
+                    console.error(`[import/pedidos] Erro no chunk ${i}:`, e.message);
                 }
             }
         }
 
         await finalizarLog(logId, 'concluido', contadores, errosLog);
+        console.log('[import/vendas] Importação concluída:', contadores);
         return { sucesso: true, logId, contadores };
 
-    } catch (err) {
-        await finalizarLog(logId, 'erro', contadores, [err.message]);
+    } catch (err: any) {
+        // Garante que o erro original não seja perdido mesmo se finalizarLog falhar.
+        try {
+            await finalizarLog(logId, 'erro', contadores, [err.message]);
+        } catch (logErr: any) {
+            console.error('[import] Falha ao finalizar log de erro:', logErr.message);
+        }
         throw err;
     }
 }
 
-async function importarRelatorioVendas(filePath, usuarioId) {
+async function importarRelatorioVendas(filePath: string, usuarioId: string) {
     const logId = await criarLog(filePath, 'froneri_vendas', usuarioId);
     const resultado = await processarRelatorioVendas(filePath, usuarioId, logId);
     return { ...resultado, logId };
 }
 
-async function iniciarImportacaoRelatorioVendas(filePath, usuarioId) {
+async function iniciarImportacaoRelatorioVendas(filePath: string, usuarioId: string) {
     const logId = await criarLog(filePath, 'froneri_vendas', usuarioId);
     const promise = processarRelatorioVendas(filePath, usuarioId, logId);
     return { logId, promise };
@@ -614,7 +717,10 @@ async function iniciarImportacaoRelatorioVendas(filePath, usuarioId) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // HELPER: Upsert clientes a partir da Base Ruptura (base completa de cadastro)
 // ═══════════════════════════════════════════════════════════════════════════════
-async function importarClientesDaBase(rows) {
+async function importarClientesDaBase(
+    rows: Record<string, unknown>[],
+    vendedoresMap: VendedoresMap,
+): Promise<{ clientesInseridos: number; erros: string[] }> {
     const COLS = [
         'customer_number', 'customer_name', 'cnpj', 'logradouro', 'bairro',
         'postal_code', 'city', 'region', 'filial', 'canal_cliente', 'hierarquia',
@@ -656,6 +762,9 @@ async function importarClientesDaBase(rows) {
         'ruptura_garoto=COALESCE(VALUES(ruptura_garoto),ruptura_garoto),' +
         'updated_at=NOW()';
 
+    let clientesInseridos = 0;
+    const erros: string[] = [];
+
     for (let i = 0; i < rows.length; i += IMPORT_CHUNK_SIZE) {
         const chunk = rows.slice(i, i + IMPORT_CHUNK_SIZE);
         const params: unknown[] = [];
@@ -663,12 +772,18 @@ async function importarClientesDaBase(rows) {
 
         for (const row of chunk) {
             const customerNumber = normNum(row['Customer Number'] || row['Sold'] || row['SOLD']);
-            if (!customerNumber) continue;
+            if (!customerNumber) {
+                console.warn(`[import/clientes] Linha sem Customer Number ignorada (chunk ${i})`);
+                continue;
+            }
 
             const description2 = norm(row['Description 2']);
             const codigoSetor  = norm(row['Código'] || row['Codigo']);
             const vendedorDesc = norm(row['Description'] || row['Vendedor']);
-            const vendedorId   = resolveVendedorId(description2, vendedorDesc, codigoSetor);
+            const vendedorId   = resolveVendedorId(vendedoresMap, description2, vendedorDesc, codigoSetor);
+            if (!vendedorId) {
+                console.warn(`[import/clientes] Vendedor não encontrado — customer=${customerNumber} Description2="${description2}" Código="${codigoSetor}"`);
+            }
             const paymentTerms = norm(col(row, 'Payment Terms', 'Descrição'));
 
             params.push(
@@ -679,7 +794,7 @@ async function importarClientesDaBase(rows) {
                 norm(col(row, 'Address Line 4', 'Bairro')),
                 norm(row['Postal Code']),
                 norm(col(row, 'City', 'Cidade')),
-                norm(row['Região']) || 'Minas Gerais',
+                norm(row['Região']),               // null se não informado — sem default 'Minas Gerais'
                 norm(row['Filial']),
                 norm(row['Canal Cliente']),
                 normDesc(row['Category Code 23 Description']),
@@ -709,14 +824,19 @@ async function importarClientesDaBase(rows) {
         if (rowCount === 0) continue;
         try {
             await query(bulkSql('clientes', COLS, rowCount, ON_DUP), params);
-        } catch (e) {
-            console.warn('[importarClientes] Erro no chunk:', e.message);
+            clientesInseridos += rowCount;
+            console.log(`[import/clientes] chunk ${i}: ${rowCount} cliente(s) upsertado(s)`);
+        } catch (e: any) {
+            erros.push(`Clientes chunk ${i}: ${e.message}`);
+            console.error(`[import/clientes] Erro no chunk ${i}:`, e.message);
         }
     }
+
+    return { clientesInseridos, erros };
 }
 
 // ─── Log helpers ─────────────────────────────────────────────────────────────
-async function criarLog(filePath, tipoArquivo, usuarioId) {
+async function criarLog(filePath: string, tipoArquivo: string, usuarioId: string): Promise<string> {
     const logId = randomUUID();
     await query(`
         INSERT INTO importacoes_log (id, arquivo_nome, tipo_arquivo, status, usuario_id)
@@ -725,8 +845,17 @@ async function criarLog(filePath, tipoArquivo, usuarioId) {
     return logId;
 }
 
-async function finalizarLog(logId, status, contadores, erros) {
-    const logText = erros.length > 0 ? erros.slice(0, 100).join('\n') : null;
+async function finalizarLog(
+    logId: string,
+    status: string,
+    contadores: Record<string, number>,
+    erros: string[],
+): Promise<void> {
+    const truncated = erros.length > 100;
+    const logEntries = truncated
+        ? [...erros.slice(0, 100), `... e mais ${erros.length - 100} erro(s) não exibido(s)`]
+        : erros;
+    const logText = logEntries.length > 0 ? logEntries.join('\n') : null;
     // registros_vendas agrega venda + amostra + devolução (todas as linhas da Base Vendas)
     const totalLinhasVendas =
         (contadores.vendas || 0) + (contadores.amostras || 0) +
@@ -750,7 +879,7 @@ async function finalizarLog(logId, status, contadores, erros) {
         contadores.pedidos  || 0,
         contadores.erros    || 0,
         logText,
-        logId
+        logId,
     ]);
 }
 

@@ -76,6 +76,7 @@ jobs:
           port: ${{ secrets.KINGHOST_FTP_PORT || 21 }}
           local-dir: ./deploy/
           server-dir: ${{ steps.remote_dir.outputs.value }}
+          dangerous-clean-slate: true
 
       - name: Instalar dependências de produção no servidor
         if: ${{ env.KINGHOST_SSH_HOST != '' }}

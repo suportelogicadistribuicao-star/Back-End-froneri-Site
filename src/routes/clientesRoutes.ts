@@ -107,42 +107,44 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
         if (com_ruptura === 'true') {
             const mesAtual = new Date().getMonth() + 1;
             const anoAtual = new Date().getFullYear();
+            params.push(mesAtual, anoAtual);
             where.push(`EXISTS (
                 SELECT 1 FROM ruptura r
                 WHERE r.customer_number = c.customer_number
-                  AND r.mes_numero = ${mesAtual} AND r.ano = ${anoAtual}
+                  AND r.mes_numero = $${p++} AND r.ano = $${p++}
             )`);
         }
 
         const whereClause = 'WHERE ' + where.join(' AND ');
+        const limitIdx = p;
+        const offsetIdx = p + 1;
 
-        const total = await query(
-            `SELECT COUNT(*) AS count FROM clientes c ${whereClause}`, params
-        );
-
-        const rows = await query(`
-            SELECT
-                c.customer_number, c.customer_name, c.cnpj, c.city,
-                c.canal_cliente, c.segmentacao_cliente, c.nova_rup, c.status,
-                c.telefone, c.tem_contrato, c.qtd_conservadora,
-                c.payment_terms, c.credit_limit, c.logradouro, c.bairro,
-                c.postal_code, c.hierarquia, c.codigo_setor,
-                v.nome AS vendedor_nome, v.setor AS vendedor_setor,
-                rot.dia_semana, rot.frequencia, rot.sequencia,
-                CASE
-                    WHEN c.nova_rup = 'C/ Compra'    THEN 'ATIVO'
-                    WHEN c.nova_rup = 'Cliente Novo' THEN 'NOVO'
-                    WHEN c.nova_rup LIKE '% Mês%'    THEN 'RISCO'
-                    WHEN c.nova_rup LIKE '%6 Meses%' THEN 'CRÍTICO'
-                    ELSE 'INDEFINIDO'
-                END AS status_compra
-            FROM clientes c
-            LEFT JOIN vendedores v   ON v.id = c.vendedor_id
-            LEFT JOIN roteirizacao rot ON rot.customer_number = c.customer_number AND rot.ativa = TRUE
-            ${whereClause}
-            ORDER BY c.customer_name
-            LIMIT $${p++} OFFSET $${p++}
-        `, [...params, Number(limit), offset]);
+        const [total, rows] = await Promise.all([
+            query(`SELECT COUNT(*) AS count FROM clientes c ${whereClause}`, params),
+            query(`
+                SELECT
+                    c.customer_number, c.customer_name, c.cnpj, c.city,
+                    c.canal_cliente, c.segmentacao_cliente, c.nova_rup, c.status,
+                    c.telefone, c.tem_contrato, c.qtd_conservadora,
+                    c.payment_terms, c.credit_limit, c.logradouro, c.bairro,
+                    c.postal_code, c.hierarquia, c.codigo_setor,
+                    v.nome AS vendedor_nome, v.setor AS vendedor_setor,
+                    rot.dia_semana, rot.frequencia, rot.sequencia,
+                    CASE
+                        WHEN c.nova_rup = 'C/ Compra'    THEN 'ATIVO'
+                        WHEN c.nova_rup = 'Cliente Novo' THEN 'NOVO'
+                        WHEN c.nova_rup LIKE '% Mês%'    THEN 'RISCO'
+                        WHEN c.nova_rup LIKE '%6 Meses%' THEN 'CRÍTICO'
+                        ELSE 'INDEFINIDO'
+                    END AS status_compra
+                FROM clientes c
+                LEFT JOIN vendedores v   ON v.id = c.vendedor_id
+                LEFT JOIN roteirizacao rot ON rot.customer_number = c.customer_number AND rot.ativa = TRUE
+                ${whereClause}
+                ORDER BY c.customer_name
+                LIMIT $${limitIdx} OFFSET $${offsetIdx}
+            `, [...params, Number(limit), offset]),
+        ]);
 
         res.json({
             total:   Number(total.rows[0].count),

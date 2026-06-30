@@ -30,27 +30,31 @@ rupturaRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
         const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
         const offset = (Number(page) - 1) * Number(limit);
 
-        const rows = await query(`
-            SELECT
-                r.id, r.customer_number, r.status_ruptura, r.justificativa,
-                r.pedido_em_carteira, r.observacao_ruptura,
-                r.observacao_cancelamento, r.data_solicitacao_cancelamento,
-                r.mes_numero, r.ano,
-                c.customer_name, c.city, c.canal_cliente, c.segmentacao_cliente,
-                c.telefone, c.nova_rup, c.cnpj,
-                v.nome AS vendedor_nome, v.setor
-            FROM ruptura r
-            JOIN clientes c ON c.customer_number = r.customer_number
-            LEFT JOIN vendedores v ON v.id = r.vendedor_id
-            ${whereSql}
-            ORDER BY c.segmentacao_cliente, c.customer_name
-            LIMIT $${p++} OFFSET $${p++}
-        `, [...params, Number(limit), offset]);
+        const limitIdx = p;
+        const offsetIdx = p + 1;
 
-        const total = await query(
-            `SELECT COUNT(*) AS count FROM ruptura r ${whereSql}`,
-            params
-        );
+        const [rows, total] = await Promise.all([
+            query(`
+                SELECT
+                    r.id, r.customer_number, r.status_ruptura, r.justificativa,
+                    r.pedido_em_carteira, r.observacao_ruptura,
+                    r.observacao_cancelamento, r.data_solicitacao_cancelamento,
+                    r.mes_numero, r.ano,
+                    c.customer_name, c.city, c.canal_cliente, c.segmentacao_cliente,
+                    c.telefone, c.nova_rup, c.cnpj,
+                    v.nome AS vendedor_nome, v.setor
+                FROM ruptura r
+                JOIN clientes c ON c.customer_number = r.customer_number
+                LEFT JOIN vendedores v ON v.id = r.vendedor_id
+                ${whereSql}
+                ORDER BY c.segmentacao_cliente, c.customer_name
+                LIMIT $${limitIdx} OFFSET $${offsetIdx}
+            `, [...params, Number(limit), offset]),
+            query(
+                `SELECT COUNT(*) AS count FROM ruptura r ${whereSql}`,
+                params
+            ),
+        ]);
 
         res.json({ total: Number(total.rows[0].count), pagina: Number(page), dados: rows.rows });
     } catch (err) {
@@ -132,8 +136,10 @@ rotRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
 // Rota para exportar roteiro do vendedor (para enviar por WhatsApp/email)
 rotRouter.get('/exportar/:vendedorId', authMiddleware, async (req, res) => {
     try {
+        const vendedorId = Number(req.params.vendedorId);
+        if (!Number.isFinite(vendedorId)) return res.status(400).json({ erro: 'ID inválido.' });
         const { dia } = req.query;
-        const params = [req.params.vendedorId];
+        const params: (number | string)[] = [vendedorId];
         const extra = dia ? `AND rot.dia_semana = $2` : '';
         if (dia) params.push(String(dia));
 
@@ -206,7 +212,8 @@ rotRouter.post('/', authMiddleware, async (req, res) => {
 
 rotRouter.put('/:id', authMiddleware, async (req, res) => {
     try {
-        const id = req.params.id;
+        const id = Number(req.params.id);
+        if (!Number.isFinite(id)) return res.status(400).json({ erro: 'ID inválido.' });
         const { customer_number, codigo_vendedor, dia_semana, frequencia } = req.body;
 
         let vendedor_id: number | undefined;
@@ -239,7 +246,8 @@ rotRouter.put('/:id', authMiddleware, async (req, res) => {
 
 rotRouter.delete('/:id', authMiddleware, async (req, res) => {
     try {
-        const id = req.params.id;
+        const id = Number(req.params.id);
+        if (!Number.isFinite(id)) return res.status(400).json({ erro: 'ID inválido.' });
         await query('UPDATE roteirizacao SET ativa = FALSE WHERE id = $1', [id]);
         res.json({ mensagem: 'Roteirização removida.' });
     } catch (err) {
@@ -315,12 +323,15 @@ const devRouter = express.Router();
 devRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
     try {
         const fvId = req.filtroVendedor;
+        // LEFT JOIN + WHERE na tabela direita = INNER JOIN implícito; usa JOIN condicional
         const rows = await query(`
             SELECT d.*,
                    c.customer_name, c.city
             FROM devedores d
-            LEFT JOIN clientes c ON c.cnpj = d.documento_cliente
-            ${fvId ? 'WHERE c.vendedor_id = $1' : ''}
+            ${fvId
+                ? 'INNER JOIN clientes c ON c.cnpj = d.documento_cliente AND c.vendedor_id = $1'
+                : 'LEFT JOIN clientes c ON c.cnpj = d.documento_cliente'
+            }
             ORDER BY d.dias_em_atraso DESC
             LIMIT 500
         `, fvId ? [fvId] : []);
