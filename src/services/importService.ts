@@ -694,7 +694,7 @@ async function processarRelatorioVendas(filePath: string, _usuarioId: string, lo
     } catch (err: any) {
         // Garante que o erro original não seja perdido mesmo se finalizarLog falhar.
         try {
-            await finalizarLog(logId, 'erro', contadores, [err.message]);
+            await finalizarLog(logId, 'erro', contadores, [...errosLog, err.message]);
         } catch (logErr: any) {
             console.error('[import] Falha ao finalizar log de erro:', logErr.message);
         }

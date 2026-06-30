@@ -21,7 +21,7 @@ router.post('/vendas', ...protegido, upload.single('arquivo'), async (req, res) 
 
     try {
         if (sync) {
-            const resultado = await importarRelatorioVendas(uploadedFilePath, req.usuario.id);
+            const resultado = await importarRelatorioVendas(uploadedFilePath, String(req.usuario.id));
             res.json({
                 mensagem: 'Relatório de Vendas importado com sucesso.',
                 importacaoId: resultado.logId,
@@ -30,7 +30,7 @@ router.post('/vendas', ...protegido, upload.single('arquivo'), async (req, res) 
             return;
         }
 
-        const { logId, promise } = await iniciarImportacaoRelatorioVendas(uploadedFilePath, req.usuario.id);
+        const { logId, promise } = await iniciarImportacaoRelatorioVendas(uploadedFilePath, String(req.usuario.id));
 
         promise
             .then(() => {
