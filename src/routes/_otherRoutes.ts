@@ -333,7 +333,7 @@ devRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
                 : 'LEFT JOIN clientes c ON c.cnpj = d.documento_cliente'
             }
             ORDER BY d.dias_em_atraso DESC
-            LIMIT 500
+            LIMIT 50000
         `, fvId ? [fvId] : []);
         res.json(rows.rows);
     } catch (err) {

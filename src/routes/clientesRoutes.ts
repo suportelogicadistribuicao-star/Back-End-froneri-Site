@@ -92,12 +92,14 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
         if (fvId) { where.push(`c.vendedor_id = $${p++}`); params.push(fvId); }
 
         if (busca) {
+            const buscaParam = `%${busca}%`;
             where.push(`(
                 unaccent(c.customer_name) ILIKE unaccent($${p}) OR
                 c.cnpj ILIKE $${p} OR
-                c.city ILIKE $${p++}
+                c.city ILIKE $${p} OR
+                c.customer_number::text ILIKE $${p++}
             )`);
-            params.push(`%${busca}%`);
+            params.push(buscaParam);
         }
         if (canal)       { where.push(`c.canal_cliente = $${p++}`);       params.push(canal);       }
         if (segmentacao) { where.push(`c.segmentacao_cliente = $${p++}`); params.push(segmentacao); }
