@@ -36,6 +36,7 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
             clientesKPI,
             pedidosKPI,
             vendasCategoria,
+            vendasCanalRes,
             devedoresKPI,
             vendasVendedorRes,
         ] = await Promise.all([
@@ -54,6 +55,7 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
                 SELECT COUNT(DISTINCT customer_number) AS total_ruptura
                 FROM ruptura
                 ${rupturaWhere}
+                ${rupturaWhere ? 'AND' : 'WHERE'} status_ruptura != 'C/ Compra'
             `, rupturaParams),
 
             // KPIs de Clientes Ativos — base atual, não filtra por mes/ano
@@ -84,6 +86,14 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
                 ${vendaWhere}
                 GROUP BY categoria
                 ORDER BY valor DESC
+            `, p),
+
+            query(`
+                SELECT canal_cliente AS name, SUM(valor_nf) AS value
+                FROM vendas
+                ${vendaWhere}
+                GROUP BY canal_cliente
+                ORDER BY value DESC
             `, p),
 
             // Devedores: usa INNER JOIN em vez de IN (subquery) para filtro por vendedor
@@ -124,6 +134,7 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
             pedidos:            pedidosKPI.rows[0],
             devedores:          devedoresKPI.rows[0],
             vendasPorCategoria: vendasCategoria.rows,
+            vendasPorCanal:     vendasCanalRes.rows,
             vendasPorVendedor:  vendasVendedorRes.rows,
         });
     } catch (err) {
