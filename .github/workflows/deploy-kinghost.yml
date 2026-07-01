@@ -80,6 +80,7 @@ jobs:
           exclude: |
             **/node_modules/**
             **/node_modules/
+            **/.deploy-deps-hash
 
       - name: Instalar dependências de produção no servidor
         if: ${{ env.KINGHOST_SSH_HOST != '' }}
@@ -96,7 +97,15 @@ jobs:
               . "$NVM_DIR/nvm.sh"
               nvm use ${{ env.APP_NODE_VERSION }} || nvm use 20
             fi
-            npm ci --omit=dev || npm install --omit=dev
+            NEW_HASH=$(sha256sum package-lock.json | awk '{print $1}')
+            OLD_HASH=""
+            [ -f .deploy-deps-hash ] && OLD_HASH=$(cat .deploy-deps-hash)
+            if [ ! -d node_modules ] || [ "$NEW_HASH" != "$OLD_HASH" ]; then
+              npm ci --omit=dev || npm install --omit=dev
+              echo "$NEW_HASH" > .deploy-deps-hash
+            else
+              echo "package-lock.json inalterado, pulando instalação de dependências"
+            fi
 
       - name: Restart Node app over SSH
         if: ${{ env.KINGHOST_SSH_HOST != '' && env.KINGHOST_APP_RESTART_CMD != '' }}
