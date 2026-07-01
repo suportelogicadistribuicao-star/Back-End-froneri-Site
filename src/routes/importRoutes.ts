@@ -11,10 +11,10 @@ const router = Router();
 const protegido = [authMiddleware, requireRole('admin', 'gerente')];
 
 /**
- * POST /api/import/vendas
+ * POST /api/import
  * Importa o Relatório de Vendas da Froneri (.xlsb)
  */
-router.post('/vendas', ...protegido, upload.single('arquivo'), async (req, res) => {
+router.post('/', ...protegido, upload.single('arquivo'), async (req, res) => {
     if (!req.file) return res.status(400).json({ erro: 'Nenhum arquivo enviado.' });
     const sync = String(req.query.sync || '').toLowerCase() === 'true';
     const uploadedFilePath = req.file.path;
@@ -61,9 +61,9 @@ router.post('/vendas', ...protegido, upload.single('arquivo'), async (req, res) 
     }
 });
 
-router.get('/vendas', ...protegido, async (_req, res) => {
+router.get('/', ...protegido, async (_req, res) => {
     return res.status(405).json({
-        erro: 'Método não permitido. Use POST /api/import/vendas com multipart/form-data no campo "arquivo".',
+        erro: 'Método não permitido. Use POST /api/import com multipart/form-data no campo "arquivo".',
     });
 });
 
