@@ -78,3 +78,16 @@ jobs:
             **/node_modules/**
             **/node_modules/
             **/.deploy-deps-hash
+
+      - name: Instalar dependências e reiniciar o servidor via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.KINGHOST_SSH_HOST }}
+          username: ${{ secrets.KINGHOST_SSH_USER }}
+          password: ${{ secrets.KINGHOST_SSH_PASSWORD }}
+          port: ${{ secrets.KINGHOST_SSH_PORT || 22 }}
+          script_stop: true
+          script: |
+            cd "${{ steps.remote_dir.outputs.value }}"
+            npm install --omit=dev
+            pm2 restart Froneri --update-env

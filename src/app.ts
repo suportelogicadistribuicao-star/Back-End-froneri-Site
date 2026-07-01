@@ -20,6 +20,9 @@ import devedoresRoutes from './routes/devedoresRoutes';
 
 const app = express();
 
+// Confia no primeiro proxy (Apache/Nginx do KingHost) para IP real do cliente
+app.set('trust proxy', 1);
+
 // ── KingHost: remove o prefixo "/froneri" do proxy antes das rotas ──────────
 app.use((req, _res, next) => {
     if (req.url.startsWith('/froneri')) {
