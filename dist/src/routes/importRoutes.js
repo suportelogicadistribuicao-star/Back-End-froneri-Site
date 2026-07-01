@@ -44,7 +44,7 @@ router.post("/vendas", ...protegido, import_multer.default.single("arquivo"), as
   const uploadedFilePath = req.file.path;
   try {
     if (sync) {
-      const resultado = await (0, import_importService.importarRelatorioVendas)(uploadedFilePath, req.usuario.id);
+      const resultado = await (0, import_importService.importarRelatorioVendas)(uploadedFilePath, String(req.usuario.id));
       res.json({
         mensagem: "Relat\xF3rio de Vendas importado com sucesso.",
         importacaoId: resultado.logId,
@@ -52,7 +52,7 @@ router.post("/vendas", ...protegido, import_multer.default.single("arquivo"), as
       });
       return;
     }
-    const { logId, promise } = await (0, import_importService.iniciarImportacaoRelatorioVendas)(uploadedFilePath, req.usuario.id);
+    const { logId, promise } = await (0, import_importService.iniciarImportacaoRelatorioVendas)(uploadedFilePath, String(req.usuario.id));
     promise.then(() => {
       console.log(`[import/vendas] Importa\xE7\xE3o conclu\xEDda. logId=${logId}`);
     }).catch((err) => {

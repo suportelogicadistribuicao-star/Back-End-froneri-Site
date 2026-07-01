@@ -46,86 +46,102 @@ router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req,
       p.push(segmentacao);
       vendaWhere += ` AND segmentacao_cliente = $${p.length}`;
     }
-    const vendasKPI = await (0, import_database.query)(`
-            SELECT
-                COUNT(DISTINCT customer_number)    AS clientes_atendidos,
-                SUM(valor_nf)                      AS valor_total_nf,
-                SUM(valor_vbc)                     AS valor_total_vbc,
-                SUM(soma_caixas)                   AS total_caixas,
-                SUM(soma_litros)                   AS total_litros
-            FROM vendas
-            ${vendaWhere}
-        `, p);
     const rupturaParams = [ano, mes];
     let rupturaWhere = "WHERE ano = $1 AND mes_numero = $2";
     if (filtroVendedor) {
       rupturaParams.push(filtroVendedor);
       rupturaWhere += ` AND vendedor_id = $${rupturaParams.length}`;
     }
-    const rupturaKPI = await (0, import_database.query)(`
-            SELECT COUNT(DISTINCT customer_number) AS total_ruptura
-            FROM ruptura
-            ${rupturaWhere}
-        `, rupturaParams);
-    const clientesKPI = await (0, import_database.query)(`
-            SELECT
-                COUNT(*) AS total_ativos,
-                COUNT(CASE WHEN nova_rup = 'C/ Compra'    THEN 1 END) AS com_compra,
-                COUNT(CASE WHEN nova_rup = 'Cliente Novo' THEN 1 END) AS novos,
-                COUNT(CASE WHEN nova_rup LIKE '%6 Meses%' THEN 1 END) AS criticos,
-                COUNT(CASE WHEN tem_contrato = TRUE        THEN 1 END) AS com_contrato
-            FROM clientes
-            WHERE status = 'C'
-            ${filtroVendedor ? "AND vendedor_id = $1" : ""}
-        `, filtroVendedor ? [filtroVendedor] : []);
     const pedidosParams = [ano, mes];
     let pedidosWhere = "WHERE ano = $1 AND mes_numero = $2";
     if (filtroVendedor) {
       pedidosParams.push(filtroVendedor);
       pedidosWhere += ` AND vendedor_id = $${pedidosParams.length}`;
     }
-    const pedidosKPI = await (0, import_database.query)(`
-            SELECT
-                COUNT(DISTINCT customer_number) AS clientes_com_pedido,
-                SUM(extended_amount)            AS valor_carteira,
-                COUNT(*)                        AS total_pedidos
-            FROM pedidos_carteira
-            ${pedidosWhere}
-        `, pedidosParams);
-    const vendasCategoria = await (0, import_database.query)(`
-            SELECT categoria, SUM(valor_nf) AS valor, SUM(soma_caixas) AS caixas
-            FROM vendas
-            ${vendaWhere}
-            GROUP BY categoria
-            ORDER BY valor DESC
-        `, p);
-    let vendasVendedor = [];
-    if (!filtroVendedor) {
-      const vv = await (0, import_database.query)(`
+    const [
+      vendasKPI,
+      rupturaKPI,
+      clientesKPI,
+      pedidosKPI,
+      vendasCategoria,
+      vendasCanalRes,
+      devedoresKPI,
+      vendasVendedorRes
+    ] = await Promise.all([
+      (0, import_database.query)(`
                 SELECT
-                    v.nome AS vendedor_nome,
-                    v.setor,
-                    COALESCE(SUM(ve.valor_nf), 0) AS valor_nf,
-                    COUNT(DISTINCT ve.customer_number) AS clientes
-                FROM vendedores v
-                LEFT JOIN vendas ve ON ve.vendedor_id = v.id
-                    AND ve.mes_numero = $1 AND ve.ano = $2
-                WHERE v.ativo = TRUE
-                GROUP BY v.id, v.nome, v.setor
-                ORDER BY valor_nf DESC
-            `, [ano, mes]);
-      vendasVendedor = vv.rows;
-    }
-    const devedoresKPI = await (0, import_database.query)(`
-            SELECT
-                COUNT(DISTINCT documento_cliente) AS total_devedores,
-                SUM(valor_titulo_saldo_devedor)   AS valor_total_devedor,
-                MAX(dias_em_atraso)               AS max_dias_atraso
-            FROM devedores
-            ${filtroVendedor ? `WHERE documento_cliente IN (
-                SELECT cnpj FROM clientes WHERE vendedor_id = $1
-            )` : ""}
-        `, filtroVendedor ? [filtroVendedor] : []);
+                    COUNT(DISTINCT customer_number)    AS clientes_atendidos,
+                    SUM(valor_nf)                      AS valor_total_nf,
+                    SUM(valor_vbc)                     AS valor_total_vbc,
+                    SUM(soma_caixas)                   AS total_caixas,
+                    SUM(soma_litros)                   AS total_litros
+                FROM vendas
+                ${vendaWhere}
+            `, p),
+      (0, import_database.query)(`
+                SELECT COUNT(DISTINCT customer_number) AS total_ruptura
+                FROM ruptura
+                ${rupturaWhere}
+                ${rupturaWhere ? "AND" : "WHERE"} status_ruptura != 'C/ Compra'
+            `, rupturaParams),
+      // KPIs de Clientes Ativos — base atual, não filtra por mes/ano
+      (0, import_database.query)(`
+                SELECT
+                    COUNT(*) AS total_ativos,
+                    COUNT(CASE WHEN nova_rup = 'C/ Compra'    THEN 1 END) AS com_compra,
+                    COUNT(CASE WHEN nova_rup = 'Cliente Novo' THEN 1 END) AS novos,
+                    COUNT(CASE WHEN nova_rup LIKE '%6 Meses%' THEN 1 END) AS criticos,
+                    COUNT(CASE WHEN tem_contrato = TRUE        THEN 1 END) AS com_contrato
+                FROM clientes
+                WHERE status = 'C'
+                ${filtroVendedor ? "AND vendedor_id = $1" : ""}
+            `, filtroVendedor ? [filtroVendedor] : []),
+      (0, import_database.query)(`
+                SELECT
+                    COUNT(DISTINCT customer_number) AS clientes_com_pedido,
+                    SUM(extended_amount)            AS valor_carteira,
+                    COUNT(*)                        AS total_pedidos
+                FROM pedidos_carteira
+                ${pedidosWhere}
+            `, pedidosParams),
+      (0, import_database.query)(`
+                SELECT categoria, SUM(valor_nf) AS valor, SUM(soma_caixas) AS caixas
+                FROM vendas
+                ${vendaWhere}
+                GROUP BY categoria
+                ORDER BY valor DESC
+            `, p),
+      (0, import_database.query)(`
+                SELECT canal_cliente AS name, SUM(valor_nf) AS value
+                FROM vendas
+                ${vendaWhere}
+                GROUP BY canal_cliente
+                ORDER BY value DESC
+            `, p),
+      // Devedores: usa INNER JOIN em vez de IN (subquery) para filtro por vendedor
+      (0, import_database.query)(`
+                SELECT
+                    COUNT(DISTINCT d.documento_cliente) AS total_devedores,
+                    SUM(d.valor_titulo_saldo_devedor)   AS valor_total_devedor,
+                    MAX(d.dias_em_atraso)               AS max_dias_atraso
+                FROM devedores d
+                ${filtroVendedor ? "INNER JOIN clientes c ON c.cnpj = d.documento_cliente AND c.vendedor_id = $1" : ""}
+            `, filtroVendedor ? [filtroVendedor] : []),
+      // Vendas por Vendedor — somente admin/gerente
+      !filtroVendedor ? (0, import_database.query)(`
+                    SELECT
+                        v.nome AS vendedor_nome,
+                        v.setor,
+                        COALESCE(SUM(ve.valor_nf), 0) AS valor_nf,
+                        COUNT(DISTINCT ve.customer_number) AS clientes
+                    FROM vendedores v
+                    LEFT JOIN vendas ve ON ve.vendedor_id = v.id
+                        AND ve.mes_numero = $1 AND ve.ano = $2
+                    WHERE v.ativo = TRUE
+                    GROUP BY v.id, v.nome, v.setor
+                    ORDER BY valor_nf DESC
+                `, [mes, ano]) : Promise.resolve({ rows: [] })
+    ]);
     res.json({
       periodo: { mes, ano },
       vendas: vendasKPI.rows[0],
@@ -134,7 +150,8 @@ router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req,
       pedidos: pedidosKPI.rows[0],
       devedores: devedoresKPI.rows[0],
       vendasPorCategoria: vendasCategoria.rows,
-      vendasPorVendedor: vendasVendedor
+      vendasPorCanal: vendasCanalRes.rows,
+      vendasPorVendedor: vendasVendedorRes.rows
     });
   } catch (err) {
     console.error("[dashboard]", err);

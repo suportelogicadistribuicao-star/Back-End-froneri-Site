@@ -89,7 +89,11 @@ router.get("/resumo", import_auth.authMiddleware, import_auth.ownDataOnly, async
       params.push(Number(ano));
     }
     const wStr = where.length ? "WHERE " + where.join(" AND ") : "";
-    const grupoCol = agrupar === "vendedor" ? "vendedor_id, vendedor_alias" : "categoria";
+    const GRUPO_COLS = {
+      vendedor: "vendedor_id, vendedor_alias",
+      categoria: "categoria"
+    };
+    const grupoCol = GRUPO_COLS[String(agrupar)] ?? "categoria";
     const rows = await (0, import_database.query)(`
             SELECT ${grupoCol},
                    SUM(valor_nf) AS valor_nf, SUM(soma_caixas) AS caixas,

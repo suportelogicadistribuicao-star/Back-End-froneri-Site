@@ -16,8 +16,6 @@ jobs:
     timeout-minutes: 30
     env:
       APP_NODE_VERSION: 24
-      KINGHOST_SSH_HOST: ${{ secrets.KINGHOST_SSH_HOST }}
-      KINGHOST_APP_RESTART_CMD: ${{ secrets.KINGHOST_APP_RESTART_CMD }}
 
     steps:
       - name: Checkout
@@ -80,30 +78,4 @@ jobs:
           exclude: |
             **/node_modules/**
             **/node_modules/
-
-      - name: Instalar dependências de produção no servidor
-        if: ${{ env.KINGHOST_SSH_HOST != '' }}
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.KINGHOST_SSH_HOST }}
-          username: ${{ secrets.KINGHOST_SSH_USER }}
-          password: ${{ secrets.KINGHOST_SSH_PASSWORD }}
-          port: ${{ secrets.KINGHOST_SSH_PORT }}
-          script: |
-            cd ${{ steps.remote_dir.outputs.value }}
-            if [ -s "$HOME/.nvm/nvm.sh" ]; then
-              export NVM_DIR="$HOME/.nvm"
-              . "$NVM_DIR/nvm.sh"
-              nvm use ${{ env.APP_NODE_VERSION }} || nvm use 20
-            fi
-            npm ci --omit=dev || npm install --omit=dev
-
-      - name: Restart Node app over SSH
-        if: ${{ env.KINGHOST_SSH_HOST != '' && env.KINGHOST_APP_RESTART_CMD != '' }}
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.KINGHOST_SSH_HOST }}
-          username: ${{ secrets.KINGHOST_SSH_USER }}
-          password: ${{ secrets.KINGHOST_SSH_PASSWORD }}
-          port: ${{ secrets.KINGHOST_SSH_PORT }}
-          script: ${{ secrets.KINGHOST_APP_RESTART_CMD }}
+            **/.deploy-deps-hash
