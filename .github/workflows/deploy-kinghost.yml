@@ -16,8 +16,6 @@ jobs:
     timeout-minutes: 30
     env:
       APP_NODE_VERSION: 24
-      KINGHOST_SSH_HOST: ${{ secrets.KINGHOST_SSH_HOST }}
-      KINGHOST_APP_RESTART_CMD: ${{ secrets.KINGHOST_APP_RESTART_CMD }}
 
     steps:
       - name: Checkout
@@ -81,38 +79,3 @@ jobs:
             **/node_modules/**
             **/node_modules/
             **/.deploy-deps-hash
-
-      - name: Instalar dependências de produção no servidor
-        if: ${{ env.KINGHOST_SSH_HOST != '' }}
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.KINGHOST_SSH_HOST }}
-          username: ${{ secrets.KINGHOST_SSH_USER }}
-          password: ${{ secrets.KINGHOST_SSH_PASSWORD }}
-          port: ${{ secrets.KINGHOST_SSH_PORT }}
-          script: |
-            cd ${{ steps.remote_dir.outputs.value }}
-            if [ -s "$HOME/.nvm/nvm.sh" ]; then
-              export NVM_DIR="$HOME/.nvm"
-              . "$NVM_DIR/nvm.sh"
-              nvm use ${{ env.APP_NODE_VERSION }} || nvm use 20
-            fi
-            NEW_HASH=$(sha256sum package-lock.json | awk '{print $1}')
-            OLD_HASH=""
-            [ -f .deploy-deps-hash ] && OLD_HASH=$(cat .deploy-deps-hash)
-            if [ ! -d node_modules ] || [ "$NEW_HASH" != "$OLD_HASH" ]; then
-              npm ci --omit=dev || npm install --omit=dev
-              echo "$NEW_HASH" > .deploy-deps-hash
-            else
-              echo "package-lock.json inalterado, pulando instalação de dependências"
-            fi
-
-      - name: Restart Node app over SSH
-        if: ${{ env.KINGHOST_SSH_HOST != '' && env.KINGHOST_APP_RESTART_CMD != '' }}
-        uses: appleboy/ssh-action@v1.2.0
-        with:
-          host: ${{ secrets.KINGHOST_SSH_HOST }}
-          username: ${{ secrets.KINGHOST_SSH_USER }}
-          password: ${{ secrets.KINGHOST_SSH_PASSWORD }}
-          port: ${{ secrets.KINGHOST_SSH_PORT }}
-          script: ${{ secrets.KINGHOST_APP_RESTART_CMD }}
