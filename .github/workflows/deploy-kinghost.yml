@@ -74,7 +74,6 @@ jobs:
           port: ${{ secrets.KINGHOST_FTP_PORT || 21 }}
           local-dir: ./deploy/
           server-dir: ${{ steps.remote_dir.outputs.value }}
-          dangerous-clean-slate: true
           exclude: |
             **/node_modules/**
             **/node_modules/
