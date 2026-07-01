@@ -104,12 +104,14 @@ router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req,
       params.push(fvId);
     }
     if (busca) {
+      const buscaParam = `%${busca}%`;
       where.push(`(
                 unaccent(c.customer_name) ILIKE unaccent($${p}) OR
                 c.cnpj ILIKE $${p} OR
-                c.city ILIKE $${p++}
+                c.city ILIKE $${p} OR
+                c.customer_number::text ILIKE $${p++}
             )`);
-      params.push(`%${busca}%`);
+      params.push(buscaParam);
     }
     if (canal) {
       where.push(`c.canal_cliente = $${p++}`);
@@ -130,40 +132,42 @@ router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req,
     if (com_ruptura === "true") {
       const mesAtual = (/* @__PURE__ */ new Date()).getMonth() + 1;
       const anoAtual = (/* @__PURE__ */ new Date()).getFullYear();
+      params.push(mesAtual, anoAtual);
       where.push(`EXISTS (
                 SELECT 1 FROM ruptura r
                 WHERE r.customer_number = c.customer_number
-                  AND r.mes_numero = ${mesAtual} AND r.ano = ${anoAtual}
+                  AND r.mes_numero = $${p++} AND r.ano = $${p++}
             )`);
     }
     const whereClause = "WHERE " + where.join(" AND ");
-    const total = await (0, import_database.query)(
-      `SELECT COUNT(*) AS count FROM clientes c ${whereClause}`,
-      params
-    );
-    const rows = await (0, import_database.query)(`
-            SELECT
-                c.customer_number, c.customer_name, c.cnpj, c.city,
-                c.canal_cliente, c.segmentacao_cliente, c.nova_rup, c.status,
-                c.telefone, c.tem_contrato, c.qtd_conservadora,
-                c.payment_terms, c.credit_limit, c.logradouro, c.bairro,
-                c.postal_code, c.hierarquia, c.codigo_setor,
-                v.nome AS vendedor_nome, v.setor AS vendedor_setor,
-                rot.dia_semana, rot.frequencia, rot.sequencia,
-                CASE
-                    WHEN c.nova_rup = 'C/ Compra'    THEN 'ATIVO'
-                    WHEN c.nova_rup = 'Cliente Novo' THEN 'NOVO'
-                    WHEN c.nova_rup LIKE '% M\xEAs%'    THEN 'RISCO'
-                    WHEN c.nova_rup LIKE '%6 Meses%' THEN 'CR\xCDTICO'
-                    ELSE 'INDEFINIDO'
-                END AS status_compra
-            FROM clientes c
-            LEFT JOIN vendedores v   ON v.id = c.vendedor_id
-            LEFT JOIN roteirizacao rot ON rot.customer_number = c.customer_number AND rot.ativa = TRUE
-            ${whereClause}
-            ORDER BY c.customer_name
-            LIMIT $${p++} OFFSET $${p++}
-        `, [...params, Number(limit), offset]);
+    const limitIdx = p;
+    const offsetIdx = p + 1;
+    const [total, rows] = await Promise.all([
+      (0, import_database.query)(`SELECT COUNT(*) AS count FROM clientes c ${whereClause}`, params),
+      (0, import_database.query)(`
+                SELECT
+                    c.customer_number, c.customer_name, c.cnpj, c.city,
+                    c.canal_cliente, c.segmentacao_cliente, c.nova_rup, c.status,
+                    c.telefone, c.tem_contrato, c.qtd_conservadora,
+                    c.payment_terms, c.credit_limit, c.logradouro, c.bairro,
+                    c.postal_code, c.hierarquia, c.codigo_setor,
+                    v.nome AS vendedor_nome, v.setor AS vendedor_setor,
+                    rot.dia_semana, rot.frequencia, rot.sequencia,
+                    CASE
+                        WHEN c.nova_rup = 'C/ Compra'    THEN 'ATIVO'
+                        WHEN c.nova_rup = 'Cliente Novo' THEN 'NOVO'
+                        WHEN c.nova_rup LIKE '% M\xEAs%'    THEN 'RISCO'
+                        WHEN c.nova_rup LIKE '%6 Meses%' THEN 'CR\xCDTICO'
+                        ELSE 'INDEFINIDO'
+                    END AS status_compra
+                FROM clientes c
+                LEFT JOIN vendedores v   ON v.id = c.vendedor_id
+                LEFT JOIN roteirizacao rot ON rot.customer_number = c.customer_number AND rot.ativa = TRUE
+                ${whereClause}
+                ORDER BY c.customer_name
+                LIMIT $${limitIdx} OFFSET $${offsetIdx}
+            `, [...params, Number(limit), offset])
+    ]);
     res.json({
       total: Number(total.rows[0].count),
       pagina: Number(page),

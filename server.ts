@@ -2,9 +2,7 @@ import 'dotenv/config';
 import app from './src/app';
 
 const PORT = parseInt(
-    process.env.PORT_DIST_SERVER ||
-    process.env.PORT             ||
-    '8080'
+    process.env.PORT_DIST_SERVER || '21062'
 );
 
 async function start() {

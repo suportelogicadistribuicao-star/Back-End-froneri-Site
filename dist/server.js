@@ -23,7 +23,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var import_config = require("dotenv/config");
 var import_app = __toESM(require("./src/app"));
 const PORT = parseInt(
-  process.env.PORT_DIST_SERVER || process.env.PORT || "8080"
+  process.env.PORT_DIST_SERVER || "21062"
 );
 async function start() {
   import_app.default.listen(PORT, "0.0.0.0", () => {

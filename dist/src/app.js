@@ -48,6 +48,12 @@ var import_cadastrosRoutes = __toESM(require("./routes/cadastrosRoutes"));
 var import_ticketsRoutes = __toESM(require("./routes/ticketsRoutes"));
 var import_devedoresRoutes = __toESM(require("./routes/devedoresRoutes"));
 const app = (0, import_express.default)();
+app.use((req, _res, next) => {
+  if (req.url.startsWith("/froneri")) {
+    req.url = req.url.replace("/froneri", "") || "/";
+  }
+  next();
+});
 app.use((0, import_helmet.default)());
 app.use((0, import_cors.default)({
   origin: process.env.CORS_ORIGIN || "*",

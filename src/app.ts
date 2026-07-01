@@ -20,6 +20,14 @@ import devedoresRoutes from './routes/devedoresRoutes';
 
 const app = express();
 
+// ── KingHost: remove o prefixo "/froneri" do proxy antes das rotas ──────────
+app.use((req, _res, next) => {
+    if (req.url.startsWith('/froneri')) {
+        req.url = req.url.replace('/froneri', '') || '/';
+    }
+    next();
+});
+
 // ── Segurança ──────────────────────────────────────────────────────────────
 app.use(helmet());
 app.use(cors({

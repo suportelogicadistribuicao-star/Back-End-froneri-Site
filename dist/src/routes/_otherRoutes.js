@@ -59,26 +59,30 @@ rupturaRouter.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, asyn
     }
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
     const offset = (Number(page) - 1) * Number(limit);
-    const rows = await (0, import_database.query)(`
-            SELECT
-                r.id, r.customer_number, r.status_ruptura, r.justificativa,
-                r.pedido_em_carteira, r.observacao_ruptura,
-                r.observacao_cancelamento, r.data_solicitacao_cancelamento,
-                r.mes_numero, r.ano,
-                c.customer_name, c.city, c.canal_cliente, c.segmentacao_cliente,
-                c.telefone, c.nova_rup, c.cnpj,
-                v.nome AS vendedor_nome, v.setor
-            FROM ruptura r
-            JOIN clientes c ON c.customer_number = r.customer_number
-            LEFT JOIN vendedores v ON v.id = r.vendedor_id
-            ${whereSql}
-            ORDER BY c.segmentacao_cliente, c.customer_name
-            LIMIT $${p++} OFFSET $${p++}
-        `, [...params, Number(limit), offset]);
-    const total = await (0, import_database.query)(
-      `SELECT COUNT(*) AS count FROM ruptura r ${whereSql}`,
-      params
-    );
+    const limitIdx = p;
+    const offsetIdx = p + 1;
+    const [rows, total] = await Promise.all([
+      (0, import_database.query)(`
+                SELECT
+                    r.id, r.customer_number, r.status_ruptura, r.justificativa,
+                    r.pedido_em_carteira, r.observacao_ruptura,
+                    r.observacao_cancelamento, r.data_solicitacao_cancelamento,
+                    r.mes_numero, r.ano,
+                    c.customer_name, c.city, c.canal_cliente, c.segmentacao_cliente,
+                    c.telefone, c.nova_rup, c.cnpj,
+                    v.nome AS vendedor_nome, v.setor
+                FROM ruptura r
+                JOIN clientes c ON c.customer_number = r.customer_number
+                LEFT JOIN vendedores v ON v.id = r.vendedor_id
+                ${whereSql}
+                ORDER BY c.segmentacao_cliente, c.customer_name
+                LIMIT $${limitIdx} OFFSET $${offsetIdx}
+            `, [...params, Number(limit), offset]),
+      (0, import_database.query)(
+        `SELECT COUNT(*) AS count FROM ruptura r ${whereSql}`,
+        params
+      )
+    ]);
     res.json({ total: Number(total.rows[0].count), pagina: Number(page), dados: rows.rows });
   } catch (err) {
     res.status(500).json({ erro: "Erro ao listar ruptura." });
@@ -160,8 +164,10 @@ rotRouter.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (r
 });
 rotRouter.get("/exportar/:vendedorId", import_auth.authMiddleware, async (req, res) => {
   try {
+    const vendedorId = Number(req.params.vendedorId);
+    if (!Number.isFinite(vendedorId)) return res.status(400).json({ erro: "ID inv\xE1lido." });
     const { dia } = req.query;
-    const params = [req.params.vendedorId];
+    const params = [vendedorId];
     const extra = dia ? `AND rot.dia_semana = $2` : "";
     if (dia) params.push(String(dia));
     const rows = await (0, import_database.query)(`
@@ -220,7 +226,8 @@ rotRouter.post("/", import_auth.authMiddleware, async (req, res) => {
 });
 rotRouter.put("/:id", import_auth.authMiddleware, async (req, res) => {
   try {
-    const id = req.params.id;
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ erro: "ID inv\xE1lido." });
     const { customer_number, codigo_vendedor, dia_semana, frequencia } = req.body;
     let vendedor_id;
     if (codigo_vendedor) {
@@ -249,7 +256,8 @@ rotRouter.put("/:id", import_auth.authMiddleware, async (req, res) => {
 });
 rotRouter.delete("/:id", import_auth.authMiddleware, async (req, res) => {
   try {
-    const id = req.params.id;
+    const id = Number(req.params.id);
+    if (!Number.isFinite(id)) return res.status(400).json({ erro: "ID inv\xE1lido." });
     await (0, import_database.query)("UPDATE roteirizacao SET ativa = FALSE WHERE id = $1", [id]);
     res.json({ mensagem: "Roteiriza\xE7\xE3o removida." });
   } catch (err) {
@@ -324,10 +332,9 @@ devRouter.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (r
             SELECT d.*,
                    c.customer_name, c.city
             FROM devedores d
-            LEFT JOIN clientes c ON c.cnpj = d.documento_cliente
-            ${fvId ? "WHERE c.vendedor_id = $1" : ""}
+            ${fvId ? "INNER JOIN clientes c ON c.cnpj = d.documento_cliente AND c.vendedor_id = $1" : "LEFT JOIN clientes c ON c.cnpj = d.documento_cliente"}
             ORDER BY d.dias_em_atraso DESC
-            LIMIT 500
+            LIMIT 50000
         `, fvId ? [fvId] : []);
     res.json(rows.rows);
   } catch (err) {

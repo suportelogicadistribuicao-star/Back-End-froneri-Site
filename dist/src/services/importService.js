@@ -37,24 +37,24 @@ var import_path = __toESM(require("path"));
 var import_fs = __toESM(require("fs"));
 var import_crypto = require("crypto");
 var import_database = require("../config/database");
-let vendedoresMap = {};
 async function loadVendedoresMap() {
   const res = await (0, import_database.query)(
     "SELECT id, codigo_vendedor, setor, territory_number, vendedor_alias FROM vendedores WHERE ativo = TRUE"
   );
-  vendedoresMap = {};
+  const map = {};
   for (const row of res.rows) {
-    if (row.territory_number) vendedoresMap[String(row.territory_number)] = row.id;
-    if (row.setor) vendedoresMap[row.setor.toUpperCase()] = row.id;
-    if (row.vendedor_alias) vendedoresMap[row.vendedor_alias.trim()] = row.id;
-    if (row.codigo_vendedor) vendedoresMap[String(row.codigo_vendedor)] = row.id;
+    if (row.territory_number) map[String(row.territory_number)] = row.id;
+    if (row.setor) map[row.setor.toUpperCase()] = row.id;
+    if (row.vendedor_alias) map[row.vendedor_alias.trim()] = row.id;
+    if (row.codigo_vendedor) map[String(row.codigo_vendedor)] = row.id;
   }
-  return vendedoresMap;
+  console.log(`[import] Mapa de vendedores carregado: ${Object.keys(map).length} entradas`);
+  return map;
 }
-function resolveVendedorId(description2, vendedorDesc, codigoSetor) {
-  if (description2 && vendedoresMap[String(description2)]) return vendedoresMap[String(description2)];
-  if (codigoSetor && vendedoresMap[codigoSetor.toUpperCase()]) return vendedoresMap[codigoSetor.toUpperCase()];
-  if (vendedorDesc && vendedoresMap[vendedorDesc.trim()]) return vendedoresMap[vendedorDesc.trim()];
+function resolveVendedorId(map, description2, vendedorDesc, codigoSetor) {
+  if (description2 && map[String(description2)]) return map[String(description2)];
+  if (codigoSetor && map[codigoSetor.toUpperCase()]) return map[codigoSetor.toUpperCase()];
+  if (vendedorDesc && map[vendedorDesc.trim()]) return map[vendedorDesc.trim()];
   return null;
 }
 const norm = (v) => v === null || v === void 0 || v === "" || typeof v === "number" && isNaN(v) ? null : String(v).trim();
@@ -78,7 +78,7 @@ const normStatusVenda = (v) => {
 };
 const normNum = (v) => {
   if (v === null || v === void 0 || v === "") return null;
-  const n = parseFloat(v);
+  const n = parseFloat(String(v));
   return isNaN(n) ? null : n;
 };
 const normDate = (v) => {
@@ -88,14 +88,20 @@ const normDate = (v) => {
     const d = new Date(Math.round((v - 25569) * 86400 * 1e3));
     return isNaN(d.getTime()) ? null : d.toISOString().split("T")[0];
   }
-  const parsed = new Date(v);
+  const s = String(v).trim();
+  const dmyMatch = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(s);
+  if (dmyMatch) {
+    const d = new Date(Date.UTC(Number(dmyMatch[3]), Number(dmyMatch[2]) - 1, Number(dmyMatch[1])));
+    return isNaN(d.getTime()) ? null : d.toISOString().split("T")[0];
+  }
+  const parsed = new Date(s);
   return isNaN(parsed.getTime()) ? null : parsed.toISOString().split("T")[0];
 };
 function getMesAno(dateStr) {
   if (!dateStr) return { mes: null, ano: null };
   const d = new Date(dateStr);
   if (isNaN(d.getTime())) return { mes: null, ano: null };
-  return { mes: d.getMonth() + 1, ano: d.getFullYear() };
+  return { mes: d.getUTCMonth() + 1, ano: d.getUTCFullYear() };
 }
 const MESES_MAP = {
   "janeiro": 1,
@@ -179,6 +185,7 @@ function inferPeriodoRelatorio(filePath, vendasRows, pedidosRows) {
   const periodoArquivo = pickPeriodoFromFileName(filePath);
   if (periodoArquivo) return { ...periodoArquivo, total: 0 };
   const hoje = /* @__PURE__ */ new Date();
+  console.warn("[import] Per\xEDodo n\xE3o inferido das abas nem do nome do arquivo \u2014 usando data de hoje como fallback");
   return {
     mes: hoje.getMonth() + 1,
     ano: hoje.getFullYear(),
@@ -207,7 +214,7 @@ function normalizeKeys(rows) {
 function sheetToRows(wb, sheetName) {
   const ws = wb.Sheets[sheetName];
   if (!ws) return [];
-  const rows = XLSX.utils.sheet_to_json(ws, { defval: null, raw: false });
+  const rows = XLSX.utils.sheet_to_json(ws, { defval: null, raw: true });
   return normalizeKeys(rows);
 }
 function normalizeSheetName(name) {
@@ -239,9 +246,9 @@ function bulkSql(table, cols, rowCount, onDup) {
   const rowPlaceholder = `(${cols.map(() => "?").join(",")})`;
   return `INSERT INTO ${table} (${cols.join(",")}) VALUES ` + Array(rowCount).fill(rowPlaceholder).join(",") + ` ON DUPLICATE KEY UPDATE ${onDup}`;
 }
-async function processarRelatorioVendas(filePath, usuarioId, logId) {
-  await loadVendedoresMap();
-  let contadores = {
+async function processarRelatorioVendas(filePath, _usuarioId, logId) {
+  const vendedoresMap = await loadVendedoresMap();
+  const contadores = {
     vendas: 0,
     amostras: 0,
     devolucoes: 0,
@@ -259,8 +266,8 @@ async function processarRelatorioVendas(filePath, usuarioId, logId) {
     const rupturaSheet = sheetToRowsFlexible(wb, "Base Ruptura", ["Ruptura", "Base ruptura"]);
     const vendasRows = vendasSheet.rows;
     const pedidosRows = pedidosSheet.rows;
-    const periodoRelatorio = inferPeriodoRelatorio(filePath, vendasRows, pedidosRows);
     const rupturaRows = rupturaSheet.rows;
+    const periodoRelatorio = inferPeriodoRelatorio(filePath, vendasRows, pedidosRows);
     if (vendasRows.length === 0 && pedidosRows.length === 0 && rupturaRows.length === 0) {
       const disponiveis = Object.keys(wb?.Sheets || {}).join(", ");
       throw new Error(
@@ -271,11 +278,16 @@ async function processarRelatorioVendas(filePath, usuarioId, logId) {
       ruptura: rupturaSheet.sheetName,
       vendas: vendasSheet.sheetName,
       pedidos: pedidosSheet.sheetName,
-      linhas: { ruptura: rupturaRows.length, vendas: vendasRows.length, pedidos: pedidosRows.length }
+      linhas: { ruptura: rupturaRows.length, vendas: vendasRows.length, pedidos: pedidosRows.length },
+      periodo: `${periodoRelatorio.mes}/${periodoRelatorio.ano}`
     });
     if (rupturaRows.length > 0) {
-      await importarClientesDaBase(rupturaRows);
-      contadores.clientes += rupturaRows.length;
+      const clienteResult = await importarClientesDaBase(rupturaRows, vendedoresMap);
+      contadores.clientes += clienteResult.clientesInseridos;
+      if (clienteResult.erros.length > 0) {
+        contadores.erros += clienteResult.erros.length;
+        errosLog.push(...clienteResult.erros);
+      }
       const RUPTURA_COLS = [
         "customer_number",
         "vendedor_id",
@@ -290,10 +302,17 @@ async function processarRelatorioVendas(filePath, usuarioId, logId) {
         const chunk = rupturaRows.slice(i, i + IMPORT_CHUNK_SIZE);
         const params = [];
         let rowCount = 0;
+        let skipped = 0;
         for (const row of chunk) {
           const customerNumber = normNum(row["Customer Number"]);
-          if (!customerNumber) continue;
-          const vendedorId = resolveVendedorId(norm(row["Description 2"]), null, norm(row["C\xF3digo"]));
+          if (!customerNumber) {
+            skipped++;
+            continue;
+          }
+          const vendedorId = resolveVendedorId(vendedoresMap, norm(row["Description 2"]), null, norm(row["C\xF3digo"]));
+          if (!vendedorId) {
+            console.warn(`[import/ruptura] Vendedor n\xE3o encontrado \u2014 Description2="${row["Description 2"]}" C\xF3digo="${row["C\xF3digo"]}" customer=${customerNumber}`);
+          }
           params.push(
             customerNumber,
             vendedorId,
@@ -305,13 +324,18 @@ async function processarRelatorioVendas(filePath, usuarioId, logId) {
           );
           rowCount++;
         }
+        if (skipped > 0) {
+          console.warn(`[import/ruptura] chunk ${i}: ${skipped} linha(s) sem Customer Number ignorada(s)`);
+        }
         if (rowCount === 0) continue;
         try {
           await (0, import_database.query)(bulkSql("ruptura", RUPTURA_COLS, rowCount, RUPTURA_ON_DUP), params);
           contadores.ruptura += rowCount;
+          console.log(`[import/ruptura] chunk ${i}: ${rowCount} registro(s) inserido(s)`);
         } catch (e) {
           contadores.erros += rowCount;
           errosLog.push(`Ruptura chunk ${i}: ${e.message}`);
+          console.error(`[import/ruptura] Erro no chunk ${i}:`, e.message);
         }
       }
     }
@@ -369,35 +393,64 @@ async function processarRelatorioVendas(filePath, usuarioId, logId) {
         "importacao_id"
       ];
       const VENDA_ON_DUP = "status_venda=VALUES(status_venda),soma_caixas=VALUES(soma_caixas),soma_pallets=VALUES(soma_pallets),soma_litros=VALUES(soma_litros),valor_nf=VALUES(valor_nf),valor_vbc=VALUES(valor_vbc)";
+      const produtosMap = /* @__PURE__ */ new Map();
+      for (const row of vendasRows) {
+        const codItem = norm(row["COD_ITEM"]);
+        if (codItem && !produtosMap.has(codItem)) {
+          produtosMap.set(codItem, [
+            codItem,
+            norm(row["Descri\xE7\xE3o Produto"]),
+            norm(row["CATEGORIA"]),
+            norm(row["SUBCATEGORIA"]),
+            norm(row["Segmento SKU"]),
+            norm(row["Categoria TOTAL SKU"])
+          ]);
+        }
+      }
+      if (produtosMap.size > 0) {
+        const produtosArr = [...produtosMap.values()];
+        for (let i = 0; i < produtosArr.length; i += IMPORT_CHUNK_SIZE) {
+          const prodChunk = produtosArr.slice(i, i + IMPORT_CHUNK_SIZE);
+          try {
+            await (0, import_database.query)(
+              bulkSql("produtos", PRODUTO_COLS, prodChunk.length, PRODUTO_ON_DUP),
+              prodChunk.flat()
+            );
+          } catch (e) {
+            errosLog.push(`Produtos chunk ${i}: ${e.message}`);
+            console.error(`[import/produtos] Erro no chunk ${i}:`, e.message);
+          }
+        }
+        console.log(`[import/vendas] ${produtosMap.size} produto(s) \xFAnico(s) processado(s)`);
+      }
       for (let i = 0; i < vendasRows.length; i += IMPORT_CHUNK_SIZE) {
         const chunk = vendasRows.slice(i, i + IMPORT_CHUNK_SIZE);
-        const produtosMap = /* @__PURE__ */ new Map();
         const cliParams = [];
         const vendaParams = [];
         let chunkVendas = 0, chunkAmostras = 0, chunkDevolucoes = 0, chunkOutros = 0;
+        let skipped = 0;
         for (const row of chunk) {
+          const customerNumber = normNum(row["Customer Number"]);
+          if (!customerNumber) {
+            skipped++;
+            continue;
+          }
           const statusVenda = normStatusVenda(row["Status"]);
           const dataFat = normDate(row["Data Faturamento"]);
           const { mes, ano } = getMesAno(dataFat);
           const mesDesc = norm(row["M\xEAs Descri\xE7\xE3o"]);
           const vendedorId = resolveVendedorId(
+            vendedoresMap,
             norm(row["Description 2"]),
             norm(row["Vendedor.Description"]),
             null
           );
-          const codItem = norm(row["COD_ITEM"]);
-          if (codItem && !produtosMap.has(codItem)) {
-            produtosMap.set(codItem, [
-              codItem,
-              norm(row["Descri\xE7\xE3o Produto"]),
-              norm(row["CATEGORIA"]),
-              norm(row["SUBCATEGORIA"]),
-              norm(row["Segmento SKU"]),
-              norm(row["Categoria TOTAL SKU"])
-            ]);
+          if (!vendedorId) {
+            console.warn(`[import/vendas] Vendedor n\xE3o encontrado \u2014 Description2="${row["Description 2"]}" customer=${customerNumber}`);
           }
+          const codItem = norm(row["COD_ITEM"]);
           cliParams.push(
-            normNum(row["Customer Number"]),
+            customerNumber,
             norm(row["Customer Name"]),
             norm(row["CNPJ"]),
             norm(row["City"]),
@@ -408,7 +461,7 @@ async function processarRelatorioVendas(filePath, usuarioId, logId) {
             vendedorId
           );
           vendaParams.push(
-            normNum(row["Customer Number"]),
+            customerNumber,
             norm(row["Customer Name"]),
             vendedorId,
             norm(row["Vendedor.Description"]),
@@ -443,32 +496,31 @@ async function processarRelatorioVendas(filePath, usuarioId, logId) {
           else if (statusVenda === "DEVOLUCAO") chunkDevolucoes++;
           else chunkOutros++;
         }
+        const rowCount = chunkVendas + chunkAmostras + chunkDevolucoes + chunkOutros;
+        if (skipped > 0) {
+          console.warn(`[import/vendas] chunk ${i}: ${skipped} linha(s) sem Customer Number ignorada(s)`);
+        }
+        if (rowCount === 0) continue;
         try {
           await (0, import_database.withTransaction)(async (client) => {
-            if (produtosMap.size > 0) {
-              await client.query(
-                bulkSql("produtos", PRODUTO_COLS, produtosMap.size, PRODUTO_ON_DUP),
-                [...produtosMap.values()].flat()
-              );
-            }
-            if (chunk.length > 0) {
-              await client.query(
-                bulkSql("clientes", CLI_VENDAS_COLS, chunk.length, CLI_VENDAS_ON_DUP),
-                cliParams
-              );
-              await client.query(
-                bulkSql("vendas", VENDA_COLS, chunk.length, VENDA_ON_DUP),
-                vendaParams
-              );
-            }
+            await client.query(
+              bulkSql("clientes", CLI_VENDAS_COLS, rowCount, CLI_VENDAS_ON_DUP),
+              cliParams
+            );
+            await client.query(
+              bulkSql("vendas", VENDA_COLS, rowCount, VENDA_ON_DUP),
+              vendaParams
+            );
           });
           contadores.vendas += chunkVendas;
           contadores.amostras += chunkAmostras;
           contadores.devolucoes += chunkDevolucoes;
           contadores.outros += chunkOutros;
+          console.log(`[import/vendas] chunk ${i}: ${rowCount} registro(s) (V=${chunkVendas} A=${chunkAmostras} D=${chunkDevolucoes} O=${chunkOutros})`);
         } catch (e) {
-          contadores.erros += chunk.length;
+          contadores.erros += rowCount;
           errosLog.push(`Vendas chunk ${i}: ${e.message}`);
+          console.error(`[import/vendas] Erro no chunk ${i}:`, e.message);
         }
       }
     }
@@ -531,10 +583,15 @@ async function processarRelatorioVendas(filePath, usuarioId, logId) {
           const orderDate = normDate(row["Order Date"]);
           const mesDesc = norm(col(row, "M\xEAs", "Mes"));
           const vendedorId = resolveVendedorId(
+            vendedoresMap,
             norm(row["Description 2"]),
             norm(row["Vendedor.Description"]),
             null
           );
+          if (!vendedorId) {
+            console.warn(`[import/pedidos] Vendedor n\xE3o encontrado \u2014 Description2="${row["Description 2"]}"`);
+          }
+          const ano = orderDate ? parseInt(orderDate.substring(0, 4), 10) : (/* @__PURE__ */ new Date()).getUTCFullYear();
           params.push(
             normNum(col(row, "Ship To Number", "Customer Number")),
             norm(col(row, "Alpha Name", "Customer Name")),
@@ -555,7 +612,7 @@ async function processarRelatorioVendas(filePath, usuarioId, logId) {
             norm(col(row, "Categoria TOTAL", "Categoria TOTAL SKU")),
             mesDesc,
             parseMesDescricao(mesDesc),
-            orderDate ? new Date(orderDate).getFullYear() : (/* @__PURE__ */ new Date()).getFullYear(),
+            ano,
             norm(row["Hierarquia"]),
             norm(row["Canal Cliente"]),
             norm(row["Filial"]),
@@ -566,16 +623,23 @@ async function processarRelatorioVendas(filePath, usuarioId, logId) {
         try {
           await (0, import_database.query)(bulkSql("pedidos_carteira", PEDIDO_COLS, chunk.length, PEDIDO_ON_DUP), params);
           contadores.pedidos += chunk.length;
+          console.log(`[import/pedidos] chunk ${i}: ${chunk.length} registro(s) inserido(s)`);
         } catch (e) {
           contadores.erros += chunk.length;
           errosLog.push(`Pedidos chunk ${i}: ${e.message}`);
+          console.error(`[import/pedidos] Erro no chunk ${i}:`, e.message);
         }
       }
     }
     await finalizarLog(logId, "concluido", contadores, errosLog);
+    console.log("[import/vendas] Importa\xE7\xE3o conclu\xEDda:", contadores);
     return { sucesso: true, logId, contadores };
   } catch (err) {
-    await finalizarLog(logId, "erro", contadores, [err.message]);
+    try {
+      await finalizarLog(logId, "erro", contadores, [...errosLog, err.message]);
+    } catch (logErr) {
+      console.error("[import] Falha ao finalizar log de erro:", logErr.message);
+    }
     throw err;
   }
 }
@@ -589,7 +653,7 @@ async function iniciarImportacaoRelatorioVendas(filePath, usuarioId) {
   const promise = processarRelatorioVendas(filePath, usuarioId, logId);
   return { logId, promise };
 }
-async function importarClientesDaBase(rows) {
+async function importarClientesDaBase(rows, vendedoresMap) {
   const COLS = [
     "customer_number",
     "customer_name",
@@ -623,17 +687,25 @@ async function importarClientesDaBase(rows) {
     "ruptura_garoto"
   ];
   const ON_DUP = "customer_name=VALUES(customer_name),cnpj=COALESCE(VALUES(cnpj),cnpj),logradouro=COALESCE(VALUES(logradouro),logradouro),bairro=COALESCE(VALUES(bairro),bairro),postal_code=COALESCE(VALUES(postal_code),postal_code),city=COALESCE(VALUES(city),city),region=COALESCE(VALUES(region),region),filial=COALESCE(VALUES(filial),filial),canal_cliente=COALESCE(VALUES(canal_cliente),canal_cliente),hierarquia=COALESCE(VALUES(hierarquia),hierarquia),hierarquia_code=COALESCE(VALUES(hierarquia_code),hierarquia_code),segmentacao_cliente=COALESCE(VALUES(segmentacao_cliente),segmentacao_cliente),categoria_code24=COALESCE(VALUES(categoria_code24),categoria_code24),payment_terms=COALESCE(VALUES(payment_terms),payment_terms),credit_limit=COALESCE(VALUES(credit_limit),credit_limit),telefone=COALESCE(VALUES(telefone),telefone),gln_number=COALESCE(VALUES(gln_number),gln_number),additional_tax_id=COALESCE(VALUES(additional_tax_id),additional_tax_id),status=VALUES(status),nova_rup=COALESCE(VALUES(nova_rup),nova_rup),tem_contrato=VALUES(tem_contrato),qtd_conservadora=COALESCE(VALUES(qtd_conservadora),qtd_conservadora),codigo_hierarquia=COALESCE(VALUES(codigo_hierarquia),codigo_hierarquia),descricao1=COALESCE(VALUES(descricao1),descricao1),codigo_setor=COALESCE(VALUES(codigo_setor),codigo_setor),territory_number=COALESCE(VALUES(territory_number),territory_number),territory_description=COALESCE(VALUES(territory_description),territory_description),vendedor_id=COALESCE(VALUES(vendedor_id),vendedor_id),ruptura_garoto=COALESCE(VALUES(ruptura_garoto),ruptura_garoto),updated_at=NOW()";
+  let clientesInseridos = 0;
+  const erros = [];
   for (let i = 0; i < rows.length; i += IMPORT_CHUNK_SIZE) {
     const chunk = rows.slice(i, i + IMPORT_CHUNK_SIZE);
     const params = [];
     let rowCount = 0;
     for (const row of chunk) {
       const customerNumber = normNum(row["Customer Number"] || row["Sold"] || row["SOLD"]);
-      if (!customerNumber) continue;
+      if (!customerNumber) {
+        console.warn(`[import/clientes] Linha sem Customer Number ignorada (chunk ${i})`);
+        continue;
+      }
       const description2 = norm(row["Description 2"]);
       const codigoSetor = norm(row["C\xF3digo"] || row["Codigo"]);
       const vendedorDesc = norm(row["Description"] || row["Vendedor"]);
-      const vendedorId = resolveVendedorId(description2, vendedorDesc, codigoSetor);
+      const vendedorId = resolveVendedorId(vendedoresMap, description2, vendedorDesc, codigoSetor);
+      if (!vendedorId) {
+        console.warn(`[import/clientes] Vendedor n\xE3o encontrado \u2014 customer=${customerNumber} Description2="${description2}" C\xF3digo="${codigoSetor}"`);
+      }
       const paymentTerms = norm(col(row, "Payment Terms", "Descri\xE7\xE3o"));
       params.push(
         customerNumber,
@@ -643,7 +715,8 @@ async function importarClientesDaBase(rows) {
         norm(col(row, "Address Line 4", "Bairro")),
         norm(row["Postal Code"]),
         norm(col(row, "City", "Cidade")),
-        norm(row["Regi\xE3o"]) || "Minas Gerais",
+        norm(row["Regi\xE3o"]),
+        // null se não informado — sem default 'Minas Gerais'
         norm(row["Filial"]),
         norm(row["Canal Cliente"]),
         normDesc(row["Category Code 23 Description"]),
@@ -672,10 +745,14 @@ async function importarClientesDaBase(rows) {
     if (rowCount === 0) continue;
     try {
       await (0, import_database.query)(bulkSql("clientes", COLS, rowCount, ON_DUP), params);
+      clientesInseridos += rowCount;
+      console.log(`[import/clientes] chunk ${i}: ${rowCount} cliente(s) upsertado(s)`);
     } catch (e) {
-      console.warn("[importarClientes] Erro no chunk:", e.message);
+      erros.push(`Clientes chunk ${i}: ${e.message}`);
+      console.error(`[import/clientes] Erro no chunk ${i}:`, e.message);
     }
   }
+  return { clientesInseridos, erros };
 }
 async function criarLog(filePath, tipoArquivo, usuarioId) {
   const logId = (0, import_crypto.randomUUID)();
@@ -686,7 +763,9 @@ async function criarLog(filePath, tipoArquivo, usuarioId) {
   return logId;
 }
 async function finalizarLog(logId, status, contadores, erros) {
-  const logText = erros.length > 0 ? erros.slice(0, 100).join("\n") : null;
+  const truncated = erros.length > 100;
+  const logEntries = truncated ? [...erros.slice(0, 100), `... e mais ${erros.length - 100} erro(s) n\xE3o exibido(s)`] : erros;
+  const logText = logEntries.length > 0 ? logEntries.join("\n") : null;
   const totalLinhasVendas = (contadores.vendas || 0) + (contadores.amostras || 0) + (contadores.devolucoes || 0) + (contadores.outros || 0);
   await (0, import_database.query)(`
         UPDATE importacoes_log SET
