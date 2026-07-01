@@ -30,8 +30,11 @@ app.use((req, _res, next) => {
 
 // ── Segurança ──────────────────────────────────────────────────────────────
 app.use(helmet());
+
+// CORS_ORIGIN aceita uma lista separada por vírgula (ex.: com e sem "www")
+const corsOrigins = (process.env.CORS_ORIGIN || '*').split(',').map(o => o.trim());
 app.use(cors({
-    origin: process.env.CORS_ORIGIN || '*',
+    origin: corsOrigins.includes('*') ? '*' : corsOrigins,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
     allowedHeaders: ['Content-Type', 'Authorization'],
 }));
