@@ -84,7 +84,7 @@ jobs:
         with:
           host: ${{ secrets.KINGHOST_SSH_HOST }}
           username: ${{ secrets.KINGHOST_SSH_USER }}
-          key: ${{ secrets.KINGHOST_SSH_PRIVATE_KEY }}
+          password: ${{ secrets.KINGHOST_SSH_PASSWORD }}
           port: ${{ secrets.KINGHOST_SSH_PORT }}
           script: |
             cd ${{ steps.remote_dir.outputs.value }}
@@ -101,6 +101,6 @@ jobs:
         with:
           host: ${{ secrets.KINGHOST_SSH_HOST }}
           username: ${{ secrets.KINGHOST_SSH_USER }}
-          key: ${{ secrets.KINGHOST_SSH_PRIVATE_KEY }}
+          password: ${{ secrets.KINGHOST_SSH_PASSWORD }}
           port: ${{ secrets.KINGHOST_SSH_PORT }}
           script: ${{ secrets.KINGHOST_APP_RESTART_CMD }}
