@@ -36,7 +36,26 @@ JWT_EXPIRES_IN=8h
 CORS_ORIGIN=*
 UPLOAD_DIR=./uploads
 UPLOAD_MAX_SIZE_MB=50
+UPLOAD_STALE_MINUTES=60
+
+# Backblaze B2 (upload de relatórios via URL pré-assinada)
+B2_ENDPOINT=https://s3.us-west-004.backblazeb2.com
+B2_REGION=us-west-004
+B2_KEY_ID=sua_key_id_b2
+B2_APPLICATION_KEY=sua_application_key_b2
+B2_BUCKET_NAME=froneri-imports
+B2_PRESIGN_EXPIRES_SECONDS=300
 ```
+
+## Upload de relatórios (Backblaze B2)
+
+Em produção na KingHost, o proxy da hospedagem bloqueia uploads `multipart/form-data` antes que cheguem ao processo Node (nada aparece no log do PM2 mesmo com a requisição correta). Para contornar isso, o upload é feito em duas etapas contra um bucket privado do Backblaze B2 (API S3-compatible), e o backend só faz chamadas de saída (nunca recebe upload direto):
+
+1. `POST /api/import/upload-url` — body `{ "nomeArquivo": "Relatorio.xlsb" }`. Retorna `{ uploadUrl, key, expiresIn }`.
+2. O cliente faz `PUT` do arquivo direto para `uploadUrl` (sem header de `Authorization` — a URL assinada já é a credencial).
+3. `POST /api/import/confirmar?sync=true|false` — body `{ "key": "..." }`. O backend baixa o arquivo do B2 (GET) e roda a importação normalmente.
+
+A rota antiga `POST /api/import` (multipart, campo `arquivo`) continua disponível apenas para uso local/dev.
 
 ## Scripts
 

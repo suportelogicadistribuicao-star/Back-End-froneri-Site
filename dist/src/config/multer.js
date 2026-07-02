@@ -27,12 +27,15 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 var multer_exports = {};
 __export(multer_exports, {
-  default: () => multer_default
+  UPLOAD_DIR: () => UPLOAD_DIR,
+  default: () => multer_default,
+  limparArquivosAntigos: () => limparArquivosAntigos
 });
 module.exports = __toCommonJS(multer_exports);
 var import_multer = __toESM(require("multer"));
 var import_path = __toESM(require("path"));
 var import_fs = __toESM(require("fs"));
+var import_uploadPolicy = require("./uploadPolicy");
 const UPLOAD_DIR = process.env.UPLOAD_DIR || "./uploads";
 if (!import_fs.default.existsSync(UPLOAD_DIR)) import_fs.default.mkdirSync(UPLOAD_DIR, { recursive: true });
 const storage = import_multer.default.diskStorage({
@@ -44,18 +47,38 @@ const storage = import_multer.default.diskStorage({
   }
 });
 const fileFilter = (_req, file, cb) => {
-  const allowed = [".xlsx", ".xlsb", ".xls"];
   const ext = import_path.default.extname(file.originalname).toLowerCase();
-  if (allowed.includes(ext)) {
+  if (import_uploadPolicy.ALLOWED_EXTENSIONS.includes(ext)) {
     cb(null, true);
   } else {
-    cb(new Error(`Formato n\xE3o suportado: ${ext}. Use ${allowed.join(", ")}`));
+    cb(new Error(`Formato n\xE3o suportado: ${ext}. Use ${import_uploadPolicy.ALLOWED_EXTENSIONS.join(", ")}`));
   }
 };
-const maxMB = parseInt(process.env.UPLOAD_MAX_SIZE_MB || "50");
 const upload = (0, import_multer.default)({
   storage,
   fileFilter,
-  limits: { fileSize: maxMB * 1024 * 1024 }
+  limits: { fileSize: import_uploadPolicy.UPLOAD_MAX_SIZE_MB * 1024 * 1024 }
 });
+const UPLOAD_STALE_MINUTES = parseInt(process.env.UPLOAD_STALE_MINUTES || "60", 10);
+function limparArquivosAntigos() {
+  const limiteMs = UPLOAD_STALE_MINUTES * 60 * 1e3;
+  const agora = Date.now();
+  for (const nome of import_fs.default.readdirSync(UPLOAD_DIR)) {
+    const caminho = import_path.default.join(UPLOAD_DIR, nome);
+    try {
+      const stat = import_fs.default.statSync(caminho);
+      if (stat.isFile() && agora - stat.mtimeMs > limiteMs) {
+        import_fs.default.unlinkSync(caminho);
+        console.log(`[upload] Arquivo antigo removido: ${nome}`);
+      }
+    } catch (err) {
+      console.error(`[upload] Falha ao limpar arquivo antigo ${nome}:`, err.message);
+    }
+  }
+}
 var multer_default = upload;
+// Annotate the CommonJS export names for ESM import in node:
+0 && (module.exports = {
+  UPLOAD_DIR,
+  limparArquivosAntigos
+});

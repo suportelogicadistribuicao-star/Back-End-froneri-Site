@@ -48,6 +48,7 @@ var import_cadastrosRoutes = __toESM(require("./routes/cadastrosRoutes"));
 var import_ticketsRoutes = __toESM(require("./routes/ticketsRoutes"));
 var import_devedoresRoutes = __toESM(require("./routes/devedoresRoutes"));
 const app = (0, import_express.default)();
+app.set("trust proxy", 1);
 app.use((req, _res, next) => {
   if (req.url.startsWith("/froneri")) {
     req.url = req.url.replace("/froneri", "") || "/";
@@ -55,8 +56,9 @@ app.use((req, _res, next) => {
   next();
 });
 app.use((0, import_helmet.default)());
+const corsOrigins = (process.env.CORS_ORIGIN || "*").split(",").map((o) => o.trim());
 app.use((0, import_cors.default)({
-  origin: process.env.CORS_ORIGIN || "*",
+  origin: corsOrigins.includes("*") ? "*" : corsOrigins,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE"],
   allowedHeaders: ["Content-Type", "Authorization"]
 }));

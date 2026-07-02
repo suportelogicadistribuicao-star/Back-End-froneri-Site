@@ -1,7 +1,12 @@
 import { Router } from 'express';
 import fs from 'fs';
+import path from 'path';
+import { pipeline } from 'stream/promises';
+import { HeadObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { authMiddleware, requireRole } from '../middleware/auth';
-import upload from '../config/multer';
+import upload, { UPLOAD_DIR, limparArquivosAntigos } from '../config/multer';
+import { s3Client, B2_BUCKET, PRESIGN_EXPIRES_SECONDS, getPresignedPutUrl } from '../config/b2';
+import { ALLOWED_EXTENSIONS, UPLOAD_MAX_SIZE_MB } from '../config/uploadPolicy';
 import { importarRelatorioVendas, iniciarImportacaoRelatorioVendas } from '../services/importService';
 import { query } from '../config/database';
 
@@ -10,18 +15,14 @@ const router = Router();
 // Apenas admin e gerente podem importar
 const protegido = [authMiddleware, requireRole('admin', 'gerente')];
 
-/**
- * POST /api/import
- * Importa o Relatório de Vendas da Froneri (.xlsb)
- */
-router.post('/', ...protegido, upload.single('arquivo'), async (req, res) => {
-    if (!req.file) return res.status(400).json({ erro: 'Nenhum arquivo enviado.' });
-    const sync = String(req.query.sync || '').toLowerCase() === 'true';
-    const uploadedFilePath = req.file.path;
-
+// Executa a importação a partir de um arquivo local e responde a requisição —
+// compartilhado pela rota legada (multer) e pela rota nova (upload-url + confirmar),
+// já que ambas terminam com o mesmo arquivo já salvo em UPLOAD_DIR.
+async function processarImportacaoEResponder(localFilePath: string, usuarioId: string, sync: boolean, res) {
     try {
         if (sync) {
-            const resultado = await importarRelatorioVendas(uploadedFilePath, String(req.usuario.id));
+            const resultado = await importarRelatorioVendas(localFilePath, usuarioId);
+            limparArquivosAntigos();
             res.json({
                 mensagem: 'Relatório de Vendas importado com sucesso.',
                 importacaoId: resultado.logId,
@@ -30,22 +31,23 @@ router.post('/', ...protegido, upload.single('arquivo'), async (req, res) => {
             return;
         }
 
-        const { logId, promise } = await iniciarImportacaoRelatorioVendas(uploadedFilePath, String(req.usuario.id));
+        const { logId, promise } = await iniciarImportacaoRelatorioVendas(localFilePath, usuarioId);
 
         promise
             .then(() => {
                 console.log(`[import/vendas] Importação concluída. logId=${logId}`);
+                limparArquivosAntigos();
             })
             .catch((err) => {
                 console.error(`[import/vendas] Falha na importação em background. logId=${logId}`, err);
             })
             .finally(() => {
-                if (fs.existsSync(uploadedFilePath)) {
-                    fs.unlinkSync(uploadedFilePath);
+                if (fs.existsSync(localFilePath)) {
+                    fs.unlinkSync(localFilePath);
                 }
             });
 
-        return res.status(202).json({
+        res.status(202).json({
             mensagem: 'Importação iniciada. Acompanhe o status pelo histórico.',
             importacaoId: logId,
             status: 'processando',
@@ -55,15 +57,110 @@ router.post('/', ...protegido, upload.single('arquivo'), async (req, res) => {
         res.status(500).json({ erro: `Erro na importação: ${err.message}` });
     } finally {
         // No modo síncrono, remove arquivo ao final da requisição.
-        if (sync && fs.existsSync(uploadedFilePath)) {
-            fs.unlinkSync(uploadedFilePath);
+        if (sync && fs.existsSync(localFilePath)) {
+            fs.unlinkSync(localFilePath);
         }
     }
+}
+
+/**
+ * POST /api/import
+ * Importa o Relatório de Vendas da Froneri (.xlsb) via multipart/form-data.
+ * Mantida para uso local/dev — em produção na KingHost o proxy bloqueia uploads
+ * multipart antes de chegar ao Node; use POST /api/import/upload-url + /confirmar.
+ */
+router.post('/', ...protegido, upload.single('arquivo'), async (req, res) => {
+    if (!req.file) return res.status(400).json({ erro: 'Nenhum arquivo enviado.' });
+    const sync = String(req.query.sync || '').toLowerCase() === 'true';
+    await processarImportacaoEResponder(req.file.path, String(req.usuario.id), sync, res);
+});
+
+/**
+ * POST /api/import/upload-url
+ * Gera uma URL pré-assinada para o cliente enviar o arquivo direto ao R2,
+ * sem passar pelo proxy da KingHost.
+ * Body: { nomeArquivo: string }
+ */
+router.post('/upload-url', ...protegido, async (req, res) => {
+    try {
+        const nomeArquivo = String(req.body?.nomeArquivo || '').trim();
+        if (!nomeArquivo) {
+            return res.status(400).json({ erro: 'Informe o nome do arquivo (nomeArquivo).' });
+        }
+
+        const ext = path.extname(nomeArquivo).toLowerCase();
+        if (!ALLOWED_EXTENSIONS.includes(ext)) {
+            return res.status(400).json({ erro: `Formato não suportado: ${ext}. Use ${ALLOWED_EXTENSIONS.join(', ')}` });
+        }
+
+        const safe = nomeArquivo.replace(/[^a-z0-9._-]/gi, '_');
+        const key = `imports/${req.usuario.id}/${Date.now()}_${safe}`;
+        const uploadUrl = await getPresignedPutUrl(key);
+
+        console.log(`[B2] Presigned URL emitida. usuario=${req.usuario.id} key=${key}`);
+        res.json({ uploadUrl, key, expiresIn: PRESIGN_EXPIRES_SECONDS });
+    } catch (err) {
+        console.error('[B2] Erro ao gerar URL pré-assinada:', err.message);
+        res.status(500).json({ erro: 'Erro ao gerar URL pré-assinada. Verifique as credenciais do B2.' });
+    }
+});
+
+/**
+ * POST /api/import/confirmar
+ * Confirma que o upload ao R2 terminou, baixa o arquivo para o servidor
+ * (requisição de saída — não passa pelo proxy da KingHost) e dispara a importação.
+ * Body: { key: string }
+ */
+router.post('/confirmar', ...protegido, async (req, res) => {
+    const key = String(req.body?.key || '').trim();
+    const sync = String(req.query.sync || '').toLowerCase() === 'true';
+
+    if (!key || key.includes('..')) {
+        return res.status(400).json({ erro: 'Chave de arquivo inválida.' });
+    }
+    if (!key.startsWith(`imports/${req.usuario.id}/`)) {
+        return res.status(403).json({ erro: 'Você não tem permissão para acessar este arquivo.' });
+    }
+    const ext = path.extname(key).toLowerCase();
+    if (!ALLOWED_EXTENSIONS.includes(ext)) {
+        return res.status(400).json({ erro: `Formato não suportado: ${ext}. Use ${ALLOWED_EXTENSIONS.join(', ')}` });
+    }
+
+    let localFilePath: string;
+    try {
+        let head;
+        try {
+            head = await s3Client.send(new HeadObjectCommand({ Bucket: B2_BUCKET, Key: key }));
+        } catch {
+            return res.status(404).json({
+                erro: 'Arquivo não encontrado no armazenamento temporário. Verifique se o upload foi concluído ou solicite uma nova URL.',
+            });
+        }
+
+        const maxBytes = UPLOAD_MAX_SIZE_MB * 1024 * 1024;
+        if ((head.ContentLength || 0) > maxBytes) {
+            await s3Client.send(new DeleteObjectCommand({ Bucket: B2_BUCKET, Key: key })).catch(() => {});
+            return res.status(413).json({ erro: `Arquivo excede o tamanho máximo de ${UPLOAD_MAX_SIZE_MB}MB.` });
+        }
+
+        const getResult = await s3Client.send(new GetObjectCommand({ Bucket: B2_BUCKET, Key: key }));
+        localFilePath = path.join(UPLOAD_DIR, `${Date.now()}_${path.basename(key)}`);
+        await pipeline(getResult.Body as NodeJS.ReadableStream, fs.createWriteStream(localFilePath));
+
+        s3Client.send(new DeleteObjectCommand({ Bucket: B2_BUCKET, Key: key })).catch((err) => {
+            console.error('[B2] Falha ao remover objeto após download:', err.message);
+        });
+    } catch (err) {
+        console.error('[B2] Erro ao baixar arquivo do B2:', err.message);
+        return res.status(500).json({ erro: 'Erro ao baixar arquivo do armazenamento temporário.' });
+    }
+
+    await processarImportacaoEResponder(localFilePath, String(req.usuario.id), sync, res);
 });
 
 router.get('/', ...protegido, async (_req, res) => {
     return res.status(405).json({
-        erro: 'Método não permitido. Use POST /api/import com multipart/form-data no campo "arquivo".',
+        erro: 'Método não permitido. Use POST /api/import/upload-url + /api/import/confirmar (produção) ou POST /api/import com multipart/form-data no campo "arquivo" (dev local).',
     });
 });
 

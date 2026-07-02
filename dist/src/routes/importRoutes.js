@@ -32,19 +32,22 @@ __export(importRoutes_exports, {
 module.exports = __toCommonJS(importRoutes_exports);
 var import_express = require("express");
 var import_fs = __toESM(require("fs"));
+var import_path = __toESM(require("path"));
+var import_promises = require("stream/promises");
+var import_client_s3 = require("@aws-sdk/client-s3");
 var import_auth = require("../middleware/auth");
 var import_multer = __toESM(require("../config/multer"));
+var import_b2 = require("../config/b2");
+var import_uploadPolicy = require("../config/uploadPolicy");
 var import_importService = require("../services/importService");
 var import_database = require("../config/database");
 const router = (0, import_express.Router)();
 const protegido = [import_auth.authMiddleware, (0, import_auth.requireRole)("admin", "gerente")];
-router.post("/vendas", ...protegido, import_multer.default.single("arquivo"), async (req, res) => {
-  if (!req.file) return res.status(400).json({ erro: "Nenhum arquivo enviado." });
-  const sync = String(req.query.sync || "").toLowerCase() === "true";
-  const uploadedFilePath = req.file.path;
+async function processarImportacaoEResponder(localFilePath, usuarioId, sync, res) {
   try {
     if (sync) {
-      const resultado = await (0, import_importService.importarRelatorioVendas)(uploadedFilePath, String(req.usuario.id));
+      const resultado = await (0, import_importService.importarRelatorioVendas)(localFilePath, usuarioId);
+      (0, import_multer.limparArquivosAntigos)();
       res.json({
         mensagem: "Relat\xF3rio de Vendas importado com sucesso.",
         importacaoId: resultado.logId,
@@ -52,17 +55,18 @@ router.post("/vendas", ...protegido, import_multer.default.single("arquivo"), as
       });
       return;
     }
-    const { logId, promise } = await (0, import_importService.iniciarImportacaoRelatorioVendas)(uploadedFilePath, String(req.usuario.id));
+    const { logId, promise } = await (0, import_importService.iniciarImportacaoRelatorioVendas)(localFilePath, usuarioId);
     promise.then(() => {
       console.log(`[import/vendas] Importa\xE7\xE3o conclu\xEDda. logId=${logId}`);
+      (0, import_multer.limparArquivosAntigos)();
     }).catch((err) => {
       console.error(`[import/vendas] Falha na importa\xE7\xE3o em background. logId=${logId}`, err);
     }).finally(() => {
-      if (import_fs.default.existsSync(uploadedFilePath)) {
-        import_fs.default.unlinkSync(uploadedFilePath);
+      if (import_fs.default.existsSync(localFilePath)) {
+        import_fs.default.unlinkSync(localFilePath);
       }
     });
-    return res.status(202).json({
+    res.status(202).json({
       mensagem: "Importa\xE7\xE3o iniciada. Acompanhe o status pelo hist\xF3rico.",
       importacaoId: logId,
       status: "processando"
@@ -71,14 +75,80 @@ router.post("/vendas", ...protegido, import_multer.default.single("arquivo"), as
     console.error("[import/vendas]", err);
     res.status(500).json({ erro: `Erro na importa\xE7\xE3o: ${err.message}` });
   } finally {
-    if (sync && import_fs.default.existsSync(uploadedFilePath)) {
-      import_fs.default.unlinkSync(uploadedFilePath);
+    if (sync && import_fs.default.existsSync(localFilePath)) {
+      import_fs.default.unlinkSync(localFilePath);
     }
   }
+}
+router.post("/", ...protegido, import_multer.default.single("arquivo"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ erro: "Nenhum arquivo enviado." });
+  const sync = String(req.query.sync || "").toLowerCase() === "true";
+  await processarImportacaoEResponder(req.file.path, String(req.usuario.id), sync, res);
 });
-router.get("/vendas", ...protegido, async (_req, res) => {
+router.post("/upload-url", ...protegido, async (req, res) => {
+  try {
+    const nomeArquivo = String(req.body?.nomeArquivo || "").trim();
+    if (!nomeArquivo) {
+      return res.status(400).json({ erro: "Informe o nome do arquivo (nomeArquivo)." });
+    }
+    const ext = import_path.default.extname(nomeArquivo).toLowerCase();
+    if (!import_uploadPolicy.ALLOWED_EXTENSIONS.includes(ext)) {
+      return res.status(400).json({ erro: `Formato n\xE3o suportado: ${ext}. Use ${import_uploadPolicy.ALLOWED_EXTENSIONS.join(", ")}` });
+    }
+    const safe = nomeArquivo.replace(/[^a-z0-9._-]/gi, "_");
+    const key = `imports/${req.usuario.id}/${Date.now()}_${safe}`;
+    const uploadUrl = await (0, import_b2.getPresignedPutUrl)(key);
+    console.log(`[B2] Presigned URL emitida. usuario=${req.usuario.id} key=${key}`);
+    res.json({ uploadUrl, key, expiresIn: import_b2.PRESIGN_EXPIRES_SECONDS });
+  } catch (err) {
+    console.error("[B2] Erro ao gerar URL pr\xE9-assinada:", err.message);
+    res.status(500).json({ erro: "Erro ao gerar URL pr\xE9-assinada. Verifique as credenciais do B2." });
+  }
+});
+router.post("/confirmar", ...protegido, async (req, res) => {
+  const key = String(req.body?.key || "").trim();
+  const sync = String(req.query.sync || "").toLowerCase() === "true";
+  if (!key || key.includes("..")) {
+    return res.status(400).json({ erro: "Chave de arquivo inv\xE1lida." });
+  }
+  if (!key.startsWith(`imports/${req.usuario.id}/`)) {
+    return res.status(403).json({ erro: "Voc\xEA n\xE3o tem permiss\xE3o para acessar este arquivo." });
+  }
+  const ext = import_path.default.extname(key).toLowerCase();
+  if (!import_uploadPolicy.ALLOWED_EXTENSIONS.includes(ext)) {
+    return res.status(400).json({ erro: `Formato n\xE3o suportado: ${ext}. Use ${import_uploadPolicy.ALLOWED_EXTENSIONS.join(", ")}` });
+  }
+  let localFilePath;
+  try {
+    let head;
+    try {
+      head = await import_b2.s3Client.send(new import_client_s3.HeadObjectCommand({ Bucket: import_b2.B2_BUCKET, Key: key }));
+    } catch {
+      return res.status(404).json({
+        erro: "Arquivo n\xE3o encontrado no armazenamento tempor\xE1rio. Verifique se o upload foi conclu\xEDdo ou solicite uma nova URL."
+      });
+    }
+    const maxBytes = import_uploadPolicy.UPLOAD_MAX_SIZE_MB * 1024 * 1024;
+    if ((head.ContentLength || 0) > maxBytes) {
+      await import_b2.s3Client.send(new import_client_s3.DeleteObjectCommand({ Bucket: import_b2.B2_BUCKET, Key: key })).catch(() => {
+      });
+      return res.status(413).json({ erro: `Arquivo excede o tamanho m\xE1ximo de ${import_uploadPolicy.UPLOAD_MAX_SIZE_MB}MB.` });
+    }
+    const getResult = await import_b2.s3Client.send(new import_client_s3.GetObjectCommand({ Bucket: import_b2.B2_BUCKET, Key: key }));
+    localFilePath = import_path.default.join(import_multer.UPLOAD_DIR, `${Date.now()}_${import_path.default.basename(key)}`);
+    await (0, import_promises.pipeline)(getResult.Body, import_fs.default.createWriteStream(localFilePath));
+    import_b2.s3Client.send(new import_client_s3.DeleteObjectCommand({ Bucket: import_b2.B2_BUCKET, Key: key })).catch((err) => {
+      console.error("[B2] Falha ao remover objeto ap\xF3s download:", err.message);
+    });
+  } catch (err) {
+    console.error("[B2] Erro ao baixar arquivo do B2:", err.message);
+    return res.status(500).json({ erro: "Erro ao baixar arquivo do armazenamento tempor\xE1rio." });
+  }
+  await processarImportacaoEResponder(localFilePath, String(req.usuario.id), sync, res);
+});
+router.get("/", ...protegido, async (_req, res) => {
   return res.status(405).json({
-    erro: 'M\xE9todo n\xE3o permitido. Use POST /api/import/vendas com multipart/form-data no campo "arquivo".'
+    erro: 'M\xE9todo n\xE3o permitido. Use POST /api/import/upload-url + /api/import/confirmar (produ\xE7\xE3o) ou POST /api/import com multipart/form-data no campo "arquivo" (dev local).'
   });
 });
 router.get("/historico", ...protegido, async (req, res) => {
