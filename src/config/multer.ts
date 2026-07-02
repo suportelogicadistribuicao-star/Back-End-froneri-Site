@@ -1,9 +1,14 @@
 import multer from 'multer';
+import os from 'os';
 import path from 'path';
 import fs from 'fs';
 import { ALLOWED_EXTENSIONS, UPLOAD_MAX_SIZE_MB } from './uploadPolicy';
 
-export const UPLOAD_DIR = process.env.UPLOAD_DIR || './uploads';
+// Fora da pasta da aplicação de propósito: o "Restart automático" do painel
+// da KingHost reinicia o processo ao detectar qualquer arquivo novo dentro do
+// diretório do app, o que derrubava a requisição no meio do download do B2
+// quando UPLOAD_DIR era relativo (./uploads, dentro da pasta observada).
+export const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(os.tmpdir(), 'froneri-uploads');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 const storage = multer.diskStorage({
