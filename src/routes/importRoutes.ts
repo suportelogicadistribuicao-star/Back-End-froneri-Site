@@ -114,11 +114,14 @@ router.post('/upload-url', ...protegido, async (req, res) => {
 router.post('/confirmar', ...protegido, async (req, res) => {
     const key = String(req.body?.key || '').trim();
     const sync = String(req.query.sync || '').toLowerCase() === 'true';
+    console.log(`[import/confirmar] recebido. usuario=${req.usuario?.id} key=${key} sync=${sync}`);
 
     if (!key || key.includes('..')) {
+        console.warn(`[import/confirmar] chave inválida: "${key}"`);
         return res.status(400).json({ erro: 'Chave de arquivo inválida.' });
     }
     if (!key.startsWith(`imports/${req.usuario.id}/`)) {
+        console.warn(`[import/confirmar] chave fora do escopo do usuário. usuario=${req.usuario.id} key=${key}`);
         return res.status(403).json({ erro: 'Você não tem permissão para acessar este arquivo.' });
     }
     const ext = path.extname(key).toLowerCase();
@@ -131,7 +134,9 @@ router.post('/confirmar', ...protegido, async (req, res) => {
         let head;
         try {
             head = await s3Client.send(new HeadObjectCommand({ Bucket: B2_BUCKET, Key: key }));
-        } catch {
+            console.log(`[import/confirmar] HeadObject ok. key=${key} tamanho=${head.ContentLength}`);
+        } catch (err) {
+            console.error(`[import/confirmar] HeadObject falhou. key=${key}`, err);
             return res.status(404).json({
                 erro: 'Arquivo não encontrado no armazenamento temporário. Verifique se o upload foi concluído ou solicite uma nova URL.',
             });
@@ -145,17 +150,27 @@ router.post('/confirmar', ...protegido, async (req, res) => {
 
         const getResult = await s3Client.send(new GetObjectCommand({ Bucket: B2_BUCKET, Key: key }));
         localFilePath = path.join(UPLOAD_DIR, `${Date.now()}_${path.basename(key)}`);
+        console.log(`[import/confirmar] baixando para ${localFilePath}`);
         await pipeline(getResult.Body as NodeJS.ReadableStream, fs.createWriteStream(localFilePath));
+        console.log(`[import/confirmar] download concluído. ${localFilePath}`);
 
         s3Client.send(new DeleteObjectCommand({ Bucket: B2_BUCKET, Key: key })).catch((err) => {
             console.error('[B2] Falha ao remover objeto após download:', err.message);
         });
     } catch (err) {
-        console.error('[B2] Erro ao baixar arquivo do B2:', err.message);
-        return res.status(500).json({ erro: 'Erro ao baixar arquivo do armazenamento temporário.' });
+        console.error(`[import/confirmar] Erro ao baixar arquivo do B2. key=${key}`, err);
+        return res.status(500).json({ erro: `Erro ao baixar arquivo do armazenamento temporário: ${err.message}` });
     }
 
-    await processarImportacaoEResponder(localFilePath, String(req.usuario.id), sync, res);
+    console.log(`[import/confirmar] iniciando processamento. arquivo=${localFilePath}`);
+    try {
+        await processarImportacaoEResponder(localFilePath, String(req.usuario.id), sync, res);
+    } catch (err) {
+        console.error(`[import/confirmar] Erro não tratado ao processar importação. arquivo=${localFilePath}`, err);
+        if (!res.headersSent) {
+            res.status(500).json({ erro: `Erro ao processar importação: ${err.message}` });
+        }
+    }
 });
 
 router.get('/', ...protegido, async (_req, res) => {
