@@ -197,7 +197,7 @@ router.get('/historico', ...protegido, async (req, res) => {
                 u.nome AS importado_por
             FROM importacoes_log il
             LEFT JOIN usuarios u ON u.id = il.usuario_id
-            ORDER BY il.id DESC
+            ORDER BY il.created_at DESC
             LIMIT $1
         `, [limit]);
 

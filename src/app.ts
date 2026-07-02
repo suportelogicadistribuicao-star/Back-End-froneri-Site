@@ -60,6 +60,15 @@ app.use('/api/auth', rateLimit({
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 
+// Respostas da API nunca devem ser cacheadas pelo navegador — o polling de
+// GET /import/historico (mesma URL a cada 3s) estava recebendo respostas
+// antigas do disk cache do Chrome, fazendo o front achar que a importação
+// nunca terminava.
+app.use('/api', (_req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    next();
+});
+
 // ── Rotas API ───────────────────────────────────────────────────────────────
 app.use('/api/auth',          authRoutes);
 app.use('/api/dashboard',     dashboardRoutes);
