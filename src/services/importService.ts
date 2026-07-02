@@ -320,6 +320,9 @@ async function processarRelatorioVendas(filePath: string, _usuarioId: string, lo
         pedidos: 0, ruptura: 0, clientes: 0, erros: 0,
     };
     const errosLog: string[] = [];
+    // Declarado fora do try para ficar disponível também no catch (finalizarLog
+    // de erro também deve gravar o período, quando já inferido antes da falha).
+    let periodoRelatorio: ReturnType<typeof inferPeriodoRelatorio> | undefined;
 
     try {
         const wb = readWorkbook(filePath);
@@ -330,7 +333,7 @@ async function processarRelatorioVendas(filePath: string, _usuarioId: string, lo
         const vendasRows  = vendasSheet.rows;
         const pedidosRows = pedidosSheet.rows;
         const rupturaRows = rupturaSheet.rows;
-        const periodoRelatorio = inferPeriodoRelatorio(filePath, vendasRows, pedidosRows);
+        periodoRelatorio = inferPeriodoRelatorio(filePath, vendasRows, pedidosRows);
 
         if (vendasRows.length === 0 && pedidosRows.length === 0 && rupturaRows.length === 0) {
             const disponiveis = Object.keys(wb?.Sheets || {}).join(', ');
@@ -351,7 +354,7 @@ async function processarRelatorioVendas(filePath: string, _usuarioId: string, lo
         // ── 1a. Base Ruptura — PRIMEIRO (popula clientes) ─────────────────────
         if (rupturaRows.length > 0) {
             // importarClientesDaBase retorna erros ao invés de swallowá-los.
-            const clienteResult = await importarClientesDaBase(rupturaRows, vendedoresMap);
+            const clienteResult = await importarClientesDaBase(rupturaRows, vendedoresMap, periodoRelatorio, logId);
             contadores.clientes += clienteResult.clientesInseridos;
             if (clienteResult.erros.length > 0) {
                 contadores.erros += clienteResult.erros.length;
@@ -687,14 +690,14 @@ async function processarRelatorioVendas(filePath: string, _usuarioId: string, lo
             }
         }
 
-        await finalizarLog(logId, 'concluido', contadores, errosLog);
+        await finalizarLog(logId, 'concluido', contadores, errosLog, periodoRelatorio);
         console.log('[import/vendas] Importação concluída:', contadores);
         return { sucesso: true, logId, contadores };
 
     } catch (err: any) {
         // Garante que o erro original não seja perdido mesmo se finalizarLog falhar.
         try {
-            await finalizarLog(logId, 'erro', contadores, [...errosLog, err.message]);
+            await finalizarLog(logId, 'erro', contadores, [...errosLog, err.message], periodoRelatorio);
         } catch (logErr: any) {
             console.error('[import] Falha ao finalizar log de erro:', logErr.message);
         }
@@ -720,6 +723,8 @@ async function iniciarImportacaoRelatorioVendas(filePath: string, usuarioId: str
 async function importarClientesDaBase(
     rows: Record<string, unknown>[],
     vendedoresMap: VendedoresMap,
+    periodoRelatorio: { mes: number; ano: number; mesReferencia: string | null },
+    logId: string,
 ): Promise<{ clientesInseridos: number; erros: string[] }> {
     const COLS = [
         'customer_number', 'customer_name', 'cnpj', 'logradouro', 'bairro',
@@ -762,12 +767,40 @@ async function importarClientesDaBase(
         'ruptura_garoto=COALESCE(VALUES(ruptura_garoto),ruptura_garoto),' +
         'updated_at=NOW()';
 
+    // Snapshot mensal — grava, além do estado atual (COLS/ON_DUP acima), uma
+    // fotografia do cliente no mês/ano da importação. Chave inclui mes/ano,
+    // então reimportar um mês passado nunca sobrescreve outros meses.
+    const HIST_COLS = [
+        'customer_number', 'mes_referencia', 'mes_numero', 'ano',
+        'customer_name', 'cnpj', 'city',
+        'status', 'nova_rup', 'tem_contrato', 'qtd_conservadora',
+        'segmentacao_cliente', 'canal_cliente', 'hierarquia', 'filial',
+        'territory_number', 'vendedor_id', 'importacao_id',
+    ];
+    const HIST_ON_DUP =
+        'customer_name=VALUES(customer_name),' +
+        'cnpj=VALUES(cnpj),' +
+        'city=VALUES(city),' +
+        'status=VALUES(status),' +
+        'nova_rup=VALUES(nova_rup),' +
+        'tem_contrato=VALUES(tem_contrato),' +
+        'qtd_conservadora=VALUES(qtd_conservadora),' +
+        'segmentacao_cliente=VALUES(segmentacao_cliente),' +
+        'canal_cliente=VALUES(canal_cliente),' +
+        'hierarquia=VALUES(hierarquia),' +
+        'filial=VALUES(filial),' +
+        'territory_number=VALUES(territory_number),' +
+        'vendedor_id=VALUES(vendedor_id),' +
+        'importacao_id=VALUES(importacao_id),' +
+        'updated_at=NOW()';
+
     let clientesInseridos = 0;
     const erros: string[] = [];
 
     for (let i = 0; i < rows.length; i += IMPORT_CHUNK_SIZE) {
         const chunk = rows.slice(i, i + IMPORT_CHUNK_SIZE);
         const params: unknown[] = [];
+        const histParams: unknown[] = [];
         let rowCount = 0;
 
         for (const row of chunk) {
@@ -818,12 +851,36 @@ async function importarClientesDaBase(
                 vendedorId,
                 norm(row['Ruptura Garoto']),
             );
+
+            histParams.push(
+                customerNumber,
+                periodoRelatorio.mesReferencia, periodoRelatorio.mes, periodoRelatorio.ano,
+                norm(col(row, 'Customer Name', 'Razão Social')),
+                norm(row['CNPJ']),
+                norm(col(row, 'City', 'Cidade')),
+                normStatus(row['Status']),
+                norm(row['Nova Rup']),
+                norm(row["C/ Contrato?"]) === 'Sim',
+                normNum(row['Qtd Conservadora']) || 0,
+                norm(row['SEGMENTAÇÃO CLIENTE']),
+                norm(row['Canal Cliente']),
+                normDesc(row['Category Code 23 Description']),
+                norm(row['Filial']),
+                normNum(description2),
+                vendedorId,
+                logId,
+            );
             rowCount++;
         }
 
         if (rowCount === 0) continue;
         try {
-            await query(bulkSql('clientes', COLS, rowCount, ON_DUP), params);
+            // Mesma transação: estado atual (clientes) e snapshot do mês da
+            // importação (clientes_historico_mensal) nunca ficam dessincronizados.
+            await withTransaction(async (client) => {
+                await client.query(bulkSql('clientes', COLS, rowCount, ON_DUP), params);
+                await client.query(bulkSql('clientes_historico_mensal', HIST_COLS, rowCount, HIST_ON_DUP), histParams);
+            });
             clientesInseridos += rowCount;
             console.log(`[import/clientes] chunk ${i}: ${rowCount} cliente(s) upsertado(s)`);
         } catch (e: any) {
@@ -850,6 +907,7 @@ async function finalizarLog(
     status: string,
     contadores: Record<string, number>,
     erros: string[],
+    periodo?: { mes: number | null; ano: number | null; mesReferencia: string | null },
 ): Promise<void> {
     const truncated = erros.length > 100;
     const logEntries = truncated
@@ -869,8 +927,11 @@ async function finalizarLog(
             registros_pedidos  = $5,
             registros_erros    = $6,
             log_erros          = $7,
+            mes_referencia     = $8,
+            mes_numero         = $9,
+            ano                = $10,
             finished_at        = NOW()
-        WHERE id = $8
+        WHERE id = $11
     `, [
         status,
         totalLinhasVendas,
@@ -879,6 +940,9 @@ async function finalizarLog(
         contadores.pedidos  || 0,
         contadores.erros    || 0,
         logText,
+        periodo?.mesReferencia ?? null,
+        periodo?.mes ?? null,
+        periodo?.ano ?? null,
         logId,
     ]);
 }

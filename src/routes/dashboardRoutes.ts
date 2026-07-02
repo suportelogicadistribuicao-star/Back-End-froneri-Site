@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { query } from '../config/database';
 import { authMiddleware, ownDataOnly } from '../middleware/auth';
+import { hasSnapshotForPeriodo } from '../services/clientesHistoricoService';
 
 const router = Router();
 
@@ -28,6 +29,38 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
         const pedidosParams: unknown[] = [ano, mes];
         let pedidosWhere = 'WHERE ano = $1 AND mes_numero = $2';
         if (filtroVendedor) { pedidosParams.push(filtroVendedor); pedidosWhere += ` AND vendedor_id = $${pedidosParams.length}`; }
+
+        // KPI de Clientes Ativos — usa o snapshot mensal (clientes_historico_mensal)
+        // quando já existe para o período pedido, senão cai no estado atual
+        // (clientes), igual sempre funcionou. Precisa ser resolvido antes do
+        // Promise.all porque decide qual query/params usar para esse KPI.
+        const usarHistoricoClientes = await hasSnapshotForPeriodo(mes, ano);
+        const clientesKPIQuery = usarHistoricoClientes
+            ? `
+                SELECT
+                    COUNT(*) AS total_ativos,
+                    COUNT(CASE WHEN nova_rup = 'C/ Compra'    THEN 1 END) AS com_compra,
+                    COUNT(CASE WHEN nova_rup = 'Cliente Novo' THEN 1 END) AS novos,
+                    COUNT(CASE WHEN nova_rup LIKE '%6 Meses%' THEN 1 END) AS criticos,
+                    COUNT(CASE WHEN tem_contrato = TRUE        THEN 1 END) AS com_contrato
+                FROM clientes_historico_mensal
+                WHERE status = 'C' AND mes_numero = $1 AND ano = $2
+                ${filtroVendedor ? 'AND vendedor_id = $3' : ''}
+            `
+            : `
+                SELECT
+                    COUNT(*) AS total_ativos,
+                    COUNT(CASE WHEN nova_rup = 'C/ Compra'    THEN 1 END) AS com_compra,
+                    COUNT(CASE WHEN nova_rup = 'Cliente Novo' THEN 1 END) AS novos,
+                    COUNT(CASE WHEN nova_rup LIKE '%6 Meses%' THEN 1 END) AS criticos,
+                    COUNT(CASE WHEN tem_contrato = TRUE        THEN 1 END) AS com_contrato
+                FROM clientes
+                WHERE status = 'C'
+                ${filtroVendedor ? 'AND vendedor_id = $1' : ''}
+            `;
+        const clientesKPIParams = usarHistoricoClientes
+            ? (filtroVendedor ? [mes, ano, filtroVendedor] : [mes, ano])
+            : (filtroVendedor ? [filtroVendedor] : []);
 
         // Todas as queries são independentes — dispara em paralelo
         const [
@@ -58,18 +91,7 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
                 ${rupturaWhere ? 'AND' : 'WHERE'} status_ruptura != 'C/ Compra'
             `, rupturaParams),
 
-            // KPIs de Clientes Ativos — base atual, não filtra por mes/ano
-            query(`
-                SELECT
-                    COUNT(*) AS total_ativos,
-                    COUNT(CASE WHEN nova_rup = 'C/ Compra'    THEN 1 END) AS com_compra,
-                    COUNT(CASE WHEN nova_rup = 'Cliente Novo' THEN 1 END) AS novos,
-                    COUNT(CASE WHEN nova_rup LIKE '%6 Meses%' THEN 1 END) AS criticos,
-                    COUNT(CASE WHEN tem_contrato = TRUE        THEN 1 END) AS com_contrato
-                FROM clientes
-                WHERE status = 'C'
-                ${filtroVendedor ? 'AND vendedor_id = $1' : ''}
-            `, filtroVendedor ? [filtroVendedor] : []),
+            query(clientesKPIQuery, clientesKPIParams),
 
             query(`
                 SELECT
@@ -130,7 +152,7 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
             periodo:            { mes, ano },
             vendas:             vendasKPI.rows[0],
             ruptura:            rupturaKPI.rows[0],
-            clientes:           clientesKPI.rows[0],
+            clientes:           { ...clientesKPI.rows[0], _fonte: usarHistoricoClientes ? 'historico' : 'atual' },
             pedidos:            pedidosKPI.rows[0],
             devedores:          devedoresKPI.rows[0],
             vendasPorCategoria: vendasCategoria.rows,
