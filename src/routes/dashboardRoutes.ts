@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { query } from '../config/database';
 import { authMiddleware, ownDataOnly } from '../middleware/auth';
-import { hasSnapshotForPeriodo } from '../services/clientesHistoricoService';
+import { hasRupturaForPeriodo } from '../services/clientesHistoricoService';
 
 const router = Router();
 
@@ -30,22 +30,27 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
         let pedidosWhere = 'WHERE ano = $1 AND mes_numero = $2';
         if (filtroVendedor) { pedidosParams.push(filtroVendedor); pedidosWhere += ` AND vendedor_id = $${pedidosParams.length}`; }
 
-        // KPI de Clientes Ativos — usa o snapshot mensal (clientes_historico_mensal)
-        // quando já existe para o período pedido, senão cai no estado atual
-        // (clientes), igual sempre funcionou. Precisa ser resolvido antes do
-        // Promise.all porque decide qual query/params usar para esse KPI.
-        const usarHistoricoClientes = await hasSnapshotForPeriodo(mes, ano);
+        // KPI de Clientes Ativos — usa o roster histórico da tabela `ruptura`
+        // (gravada por mes/ano em toda importação, ao contrário do snapshot novo
+        // `clientes_historico_mensal`, que só existe a partir de 02/07/2026 e não
+        // tem carga retroativa) quando já existe alguma linha para o período
+        // pedido; senão cai no estado atual (clientes). `status_ruptura` vem da
+        // mesma coluna de origem que `nova_rup`, então a classificação bate.
+        // Precisa ser resolvido antes do Promise.all porque decide qual
+        // query/params usar para esse KPI.
+        const usarHistoricoClientes = await hasRupturaForPeriodo(mes, ano);
         const clientesKPIQuery = usarHistoricoClientes
             ? `
                 SELECT
-                    COUNT(*) AS total_ativos,
-                    COUNT(CASE WHEN nova_rup = 'C/ Compra'    THEN 1 END) AS com_compra,
-                    COUNT(CASE WHEN nova_rup = 'Cliente Novo' THEN 1 END) AS novos,
-                    COUNT(CASE WHEN nova_rup LIKE '%6 Meses%' THEN 1 END) AS criticos,
-                    COUNT(CASE WHEN tem_contrato = TRUE        THEN 1 END) AS com_contrato
-                FROM clientes_historico_mensal
-                WHERE status = 'C' AND mes_numero = $1 AND ano = $2
-                ${filtroVendedor ? 'AND vendedor_id = $3' : ''}
+                    COUNT(DISTINCT r.customer_number) AS total_ativos,
+                    COUNT(DISTINCT CASE WHEN r.status_ruptura = 'C/ Compra'    THEN r.customer_number END) AS com_compra,
+                    COUNT(DISTINCT CASE WHEN r.status_ruptura = 'Cliente Novo' THEN r.customer_number END) AS novos,
+                    COUNT(DISTINCT CASE WHEN r.status_ruptura LIKE '%6 Meses%' THEN r.customer_number END) AS criticos,
+                    COUNT(DISTINCT CASE WHEN c.tem_contrato = TRUE THEN r.customer_number END) AS com_contrato
+                FROM ruptura r
+                LEFT JOIN clientes c ON c.customer_number = r.customer_number
+                WHERE r.mes_numero = $1 AND r.ano = $2
+                ${filtroVendedor ? 'AND r.vendedor_id = $3' : ''}
             `
             : `
                 SELECT
