@@ -224,11 +224,13 @@ function inferPeriodoRelatorio(
 }
 
 // ─── Ler planilha com xlsx ────────────────────────────────────────────────────
-function readWorkbook(filePath: string) {
+// fileBuffer, quando informado, evita ir ao disco (ex.: arquivo baixado do B2
+// e mantido em memória) — filePath continua servindo só para extrair extensão/nome.
+function readWorkbook(filePath: string, fileBuffer?: Buffer) {
     const ext = path.extname(filePath).toLowerCase();
     // cellDates:true converte seriais numéricos em Date objects.
     const opts = { type: 'buffer' as const, cellDates: true };
-    const buffer = fs.readFileSync(filePath);
+    const buffer = fileBuffer ?? fs.readFileSync(filePath);
     if (ext === '.xlsb') {
         return XLSX.read(buffer, { ...opts, type: 'buffer' });
     }
@@ -311,7 +313,7 @@ function bulkSql(table: string, cols: string[], rowCount: number, onDup: string)
 //    Ordem obrigatória: Base Ruptura → Base Vendas → Base Ordens Carteira
 //    Base Ruptura primeiro para garantir que clientes existam antes dos FKs.
 // ═══════════════════════════════════════════════════════════════════════════════
-async function processarRelatorioVendas(filePath: string, _usuarioId: string, logId: string) {
+async function processarRelatorioVendas(filePath: string, _usuarioId: string, logId: string, fileBuffer?: Buffer) {
     // Mapa local por invocação — duas importações simultâneas não compartilham estado.
     const vendedoresMap = await loadVendedoresMap();
 
@@ -322,7 +324,7 @@ async function processarRelatorioVendas(filePath: string, _usuarioId: string, lo
     const errosLog: string[] = [];
 
     try {
-        const wb = readWorkbook(filePath);
+        const wb = readWorkbook(filePath, fileBuffer);
         const vendasSheet  = sheetToRowsFlexible(wb, 'Base Vendas', ['Base vendas', 'Vendas']);
         const pedidosSheet = sheetToRowsFlexible(wb, 'Base Ordens Carteira', ['Base Ordens de Carteira', 'Ordens Carteira']);
         const rupturaSheet = sheetToRowsFlexible(wb, 'Base Ruptura', ['Ruptura', 'Base ruptura']);
@@ -702,15 +704,15 @@ async function processarRelatorioVendas(filePath: string, _usuarioId: string, lo
     }
 }
 
-async function importarRelatorioVendas(filePath: string, usuarioId: string) {
+async function importarRelatorioVendas(filePath: string, usuarioId: string, fileBuffer?: Buffer) {
     const logId = await criarLog(filePath, 'froneri_vendas', usuarioId);
-    const resultado = await processarRelatorioVendas(filePath, usuarioId, logId);
+    const resultado = await processarRelatorioVendas(filePath, usuarioId, logId, fileBuffer);
     return { ...resultado, logId };
 }
 
-async function iniciarImportacaoRelatorioVendas(filePath: string, usuarioId: string) {
+async function iniciarImportacaoRelatorioVendas(filePath: string, usuarioId: string, fileBuffer?: Buffer) {
     const logId = await criarLog(filePath, 'froneri_vendas', usuarioId);
-    const promise = processarRelatorioVendas(filePath, usuarioId, logId);
+    const promise = processarRelatorioVendas(filePath, usuarioId, logId, fileBuffer);
     return { logId, promise };
 }
 

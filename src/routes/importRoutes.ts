@@ -1,10 +1,9 @@
 import { Router } from 'express';
 import fs from 'fs';
 import path from 'path';
-import { pipeline } from 'stream/promises';
 import { HeadObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { authMiddleware, requireRole } from '../middleware/auth';
-import upload, { UPLOAD_DIR, limparArquivosAntigos } from '../config/multer';
+import upload, { limparArquivosAntigos } from '../config/multer';
 import { s3Client, B2_BUCKET, PRESIGN_EXPIRES_SECONDS, getPresignedPutUrl } from '../config/b2';
 import { ALLOWED_EXTENSIONS, UPLOAD_MAX_SIZE_MB } from '../config/uploadPolicy';
 import { importarRelatorioVendas, iniciarImportacaoRelatorioVendas } from '../services/importService';
@@ -15,14 +14,15 @@ const router = Router();
 // Apenas admin e gerente podem importar
 const protegido = [authMiddleware, requireRole('admin', 'gerente')];
 
-// Executa a importação a partir de um arquivo local e responde a requisição —
-// compartilhado pela rota legada (multer) e pela rota nova (upload-url + confirmar),
-// já que ambas terminam com o mesmo arquivo já salvo em UPLOAD_DIR.
-async function processarImportacaoEResponder(localFilePath: string, usuarioId: string, sync: boolean, res) {
+// Executa a importação e responde a requisição — compartilhado pela rota legada
+// (multer, sempre em disco) e pela rota nova (upload-url + confirmar). Quando
+// fileBuffer é informado (fluxo B2), filePath é só um nome lógico (para
+// extensão/log) e nenhuma limpeza de disco é feita, pois nada foi gravado nele.
+async function processarImportacaoEResponder(filePath: string, usuarioId: string, sync: boolean, res, fileBuffer?: Buffer) {
     try {
         if (sync) {
-            const resultado = await importarRelatorioVendas(localFilePath, usuarioId);
-            limparArquivosAntigos();
+            const resultado = await importarRelatorioVendas(filePath, usuarioId, fileBuffer);
+            if (!fileBuffer) limparArquivosAntigos();
             res.json({
                 mensagem: 'Relatório de Vendas importado com sucesso.',
                 importacaoId: resultado.logId,
@@ -31,19 +31,19 @@ async function processarImportacaoEResponder(localFilePath: string, usuarioId: s
             return;
         }
 
-        const { logId, promise } = await iniciarImportacaoRelatorioVendas(localFilePath, usuarioId);
+        const { logId, promise } = await iniciarImportacaoRelatorioVendas(filePath, usuarioId, fileBuffer);
 
         promise
             .then(() => {
                 console.log(`[import/vendas] Importação concluída. logId=${logId}`);
-                limparArquivosAntigos();
+                if (!fileBuffer) limparArquivosAntigos();
             })
             .catch((err) => {
                 console.error(`[import/vendas] Falha na importação em background. logId=${logId}`, err);
             })
             .finally(() => {
-                if (fs.existsSync(localFilePath)) {
-                    fs.unlinkSync(localFilePath);
+                if (!fileBuffer && fs.existsSync(filePath)) {
+                    fs.unlinkSync(filePath);
                 }
             });
 
@@ -56,9 +56,9 @@ async function processarImportacaoEResponder(localFilePath: string, usuarioId: s
         console.error('[import/vendas]', err);
         res.status(500).json({ erro: `Erro na importação: ${err.message}` });
     } finally {
-        // No modo síncrono, remove arquivo ao final da requisição.
-        if (sync && fs.existsSync(localFilePath)) {
-            fs.unlinkSync(localFilePath);
+        // No modo síncrono, remove arquivo ao final da requisição (só quando veio de disco).
+        if (!fileBuffer && sync && fs.existsSync(filePath)) {
+            fs.unlinkSync(filePath);
         }
     }
 }
@@ -107,8 +107,10 @@ router.post('/upload-url', ...protegido, async (req, res) => {
 
 /**
  * POST /api/import/confirmar
- * Confirma que o upload ao R2 terminou, baixa o arquivo para o servidor
- * (requisição de saída — não passa pelo proxy da KingHost) e dispara a importação.
+ * Confirma que o upload ao B2 terminou, baixa o arquivo para a memória do
+ * servidor (requisição de saída — não passa pelo proxy da KingHost) e dispara
+ * a importação. Baixar direto para um Buffer (em vez de gravar em /tmp) evita
+ * depender de um diretório em disco compartilhado/efêmero na hospedagem.
  * Body: { key: string }
  */
 router.post('/confirmar', ...protegido, async (req, res) => {
@@ -129,7 +131,8 @@ router.post('/confirmar', ...protegido, async (req, res) => {
         return res.status(400).json({ erro: `Formato não suportado: ${ext}. Use ${ALLOWED_EXTENSIONS.join(', ')}` });
     }
 
-    let localFilePath: string;
+    const nomeArquivo = path.basename(key);
+    let fileBuffer: Buffer;
     try {
         let head;
         try {
@@ -149,10 +152,9 @@ router.post('/confirmar', ...protegido, async (req, res) => {
         }
 
         const getResult = await s3Client.send(new GetObjectCommand({ Bucket: B2_BUCKET, Key: key }));
-        localFilePath = path.join(UPLOAD_DIR, `${Date.now()}_${path.basename(key)}`);
-        console.log(`[import/confirmar] baixando para ${localFilePath}`);
-        await pipeline(getResult.Body as NodeJS.ReadableStream, fs.createWriteStream(localFilePath));
-        console.log(`[import/confirmar] download concluído. ${localFilePath}`);
+        console.log(`[import/confirmar] baixando para memória. arquivo=${nomeArquivo}`);
+        fileBuffer = Buffer.from(await getResult.Body!.transformToByteArray());
+        console.log(`[import/confirmar] download concluído. arquivo=${nomeArquivo} bytes=${fileBuffer.length}`);
 
         s3Client.send(new DeleteObjectCommand({ Bucket: B2_BUCKET, Key: key })).catch((err) => {
             console.error('[B2] Falha ao remover objeto após download:', err.message);
@@ -162,11 +164,11 @@ router.post('/confirmar', ...protegido, async (req, res) => {
         return res.status(500).json({ erro: `Erro ao baixar arquivo do armazenamento temporário: ${err.message}` });
     }
 
-    console.log(`[import/confirmar] iniciando processamento. arquivo=${localFilePath}`);
+    console.log(`[import/confirmar] iniciando processamento. arquivo=${nomeArquivo}`);
     try {
-        await processarImportacaoEResponder(localFilePath, String(req.usuario.id), sync, res);
+        await processarImportacaoEResponder(nomeArquivo, String(req.usuario.id), sync, res, fileBuffer);
     } catch (err) {
-        console.error(`[import/confirmar] Erro não tratado ao processar importação. arquivo=${localFilePath}`, err);
+        console.error(`[import/confirmar] Erro não tratado ao processar importação. arquivo=${nomeArquivo}`, err);
         if (!res.headersSent) {
             res.status(500).json({ erro: `Erro ao processar importação: ${err.message}` });
         }
