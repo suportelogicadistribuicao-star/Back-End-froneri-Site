@@ -108,10 +108,13 @@ router.post("/upload-url", ...protegido, async (req, res) => {
 router.post("/confirmar", ...protegido, async (req, res) => {
   const key = String(req.body?.key || "").trim();
   const sync = String(req.query.sync || "").toLowerCase() === "true";
+  console.log(`[import/confirmar] recebido. usuario=${req.usuario?.id} key=${key} sync=${sync}`);
   if (!key || key.includes("..")) {
+    console.warn(`[import/confirmar] chave inv\xE1lida: "${key}"`);
     return res.status(400).json({ erro: "Chave de arquivo inv\xE1lida." });
   }
   if (!key.startsWith(`imports/${req.usuario.id}/`)) {
+    console.warn(`[import/confirmar] chave fora do escopo do usu\xE1rio. usuario=${req.usuario.id} key=${key}`);
     return res.status(403).json({ erro: "Voc\xEA n\xE3o tem permiss\xE3o para acessar este arquivo." });
   }
   const ext = import_path.default.extname(key).toLowerCase();
@@ -123,7 +126,9 @@ router.post("/confirmar", ...protegido, async (req, res) => {
     let head;
     try {
       head = await import_b2.s3Client.send(new import_client_s3.HeadObjectCommand({ Bucket: import_b2.B2_BUCKET, Key: key }));
-    } catch {
+      console.log(`[import/confirmar] HeadObject ok. key=${key} tamanho=${head.ContentLength}`);
+    } catch (err) {
+      console.error(`[import/confirmar] HeadObject falhou. key=${key}`, err);
       return res.status(404).json({
         erro: "Arquivo n\xE3o encontrado no armazenamento tempor\xE1rio. Verifique se o upload foi conclu\xEDdo ou solicite uma nova URL."
       });
@@ -135,16 +140,27 @@ router.post("/confirmar", ...protegido, async (req, res) => {
       return res.status(413).json({ erro: `Arquivo excede o tamanho m\xE1ximo de ${import_uploadPolicy.UPLOAD_MAX_SIZE_MB}MB.` });
     }
     const getResult = await import_b2.s3Client.send(new import_client_s3.GetObjectCommand({ Bucket: import_b2.B2_BUCKET, Key: key }));
+    (0, import_multer.ensureUploadDir)();
     localFilePath = import_path.default.join(import_multer.UPLOAD_DIR, `${Date.now()}_${import_path.default.basename(key)}`);
+    console.log(`[import/confirmar] baixando para ${localFilePath}`);
     await (0, import_promises.pipeline)(getResult.Body, import_fs.default.createWriteStream(localFilePath));
+    console.log(`[import/confirmar] download conclu\xEDdo. ${localFilePath}`);
     import_b2.s3Client.send(new import_client_s3.DeleteObjectCommand({ Bucket: import_b2.B2_BUCKET, Key: key })).catch((err) => {
       console.error("[B2] Falha ao remover objeto ap\xF3s download:", err.message);
     });
   } catch (err) {
-    console.error("[B2] Erro ao baixar arquivo do B2:", err.message);
-    return res.status(500).json({ erro: "Erro ao baixar arquivo do armazenamento tempor\xE1rio." });
+    console.error(`[import/confirmar] Erro ao baixar arquivo do B2. key=${key}`, err);
+    return res.status(500).json({ erro: `Erro ao baixar arquivo do armazenamento tempor\xE1rio: ${err.message}` });
   }
-  await processarImportacaoEResponder(localFilePath, String(req.usuario.id), sync, res);
+  console.log(`[import/confirmar] iniciando processamento. arquivo=${localFilePath}`);
+  try {
+    await processarImportacaoEResponder(localFilePath, String(req.usuario.id), sync, res);
+  } catch (err) {
+    console.error(`[import/confirmar] Erro n\xE3o tratado ao processar importa\xE7\xE3o. arquivo=${localFilePath}`, err);
+    if (!res.headersSent) {
+      res.status(500).json({ erro: `Erro ao processar importa\xE7\xE3o: ${err.message}` });
+    }
+  }
 });
 router.get("/", ...protegido, async (_req, res) => {
   return res.status(405).json({
@@ -165,7 +181,7 @@ router.get("/historico", ...protegido, async (req, res) => {
                 u.nome AS importado_por
             FROM importacoes_log il
             LEFT JOIN usuarios u ON u.id = il.usuario_id
-            ORDER BY il.id DESC
+            ORDER BY il.created_at DESC
             LIMIT $1
         `, [limit]);
     res.json(rows.rows);

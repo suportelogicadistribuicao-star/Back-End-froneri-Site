@@ -27,6 +27,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 var database_exports = {};
 __export(database_exports, {
+  ensureClientesHistoricoTable: () => ensureClientesHistoricoTable,
   ensurePerformanceIndexes: () => ensurePerformanceIndexes,
   pool: () => pool,
   query: () => query,
@@ -192,8 +193,44 @@ async function ensurePerformanceIndexes() {
     }
   }
 }
+async function ensureClientesHistoricoTable() {
+  const sql = `
+        CREATE TABLE IF NOT EXISTS clientes_historico_mensal (
+            id                    INT AUTO_INCREMENT PRIMARY KEY,
+            customer_number       INT NOT NULL,
+            mes_referencia        VARCHAR(20)  NULL,
+            mes_numero            TINYINT      NOT NULL,
+            ano                   SMALLINT     NOT NULL,
+            customer_name         VARCHAR(255) NULL,
+            cnpj                  VARCHAR(30)  NULL,
+            city                  VARCHAR(120) NULL,
+            status                CHAR(2)      NOT NULL DEFAULT 'C',
+            nova_rup              VARCHAR(60)  NULL,
+            tem_contrato          TINYINT(1)   NOT NULL DEFAULT 0,
+            qtd_conservadora      INT          NOT NULL DEFAULT 0,
+            segmentacao_cliente   VARCHAR(60)  NULL,
+            canal_cliente         VARCHAR(60)  NULL,
+            hierarquia            VARCHAR(120) NULL,
+            filial                VARCHAR(60)  NULL,
+            territory_number      INT          NULL,
+            vendedor_id           INT          NULL,
+            importacao_id         CHAR(36)     NULL,
+            created_at            TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at            TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_cliente_historico_periodo (customer_number, mes_numero, ano),
+            KEY idx_cliente_historico_periodo (mes_numero, ano)
+        )
+    `;
+  try {
+    await pool.query(sql);
+    console.log("[DB] Tabela clientes_historico_mensal verificada/criada.");
+  } catch (err) {
+    console.error("[DB] Falha ao garantir tabela clientes_historico_mensal:", err?.message || err);
+  }
+}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  ensureClientesHistoricoTable,
   ensurePerformanceIndexes,
   pool,
   query,

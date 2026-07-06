@@ -176,5 +176,46 @@ async function ensurePerformanceIndexes() {
     }
 }
 
-export { pool, query, withTransaction, testConnection, ensurePerformanceIndexes };
+// `clientes_historico_mensal` não tem migração própria no repositório — a tabela
+// era criada manualmente em produção. IF NOT EXISTS torna isso idempotente: em
+// bases onde ela já existe é um no-op; em bases novas garante que o import
+// (importService.ts) sempre encontre a tabela com a chave única que seu
+// ON DUPLICATE KEY UPDATE espera, em vez de falhar a transação inteira.
+async function ensureClientesHistoricoTable() {
+    const sql = `
+        CREATE TABLE IF NOT EXISTS clientes_historico_mensal (
+            id                    INT AUTO_INCREMENT PRIMARY KEY,
+            customer_number       INT NOT NULL,
+            mes_referencia        VARCHAR(20)  NULL,
+            mes_numero            TINYINT      NOT NULL,
+            ano                   SMALLINT     NOT NULL,
+            customer_name         VARCHAR(255) NULL,
+            cnpj                  VARCHAR(30)  NULL,
+            city                  VARCHAR(120) NULL,
+            status                CHAR(2)      NOT NULL DEFAULT 'C',
+            nova_rup              VARCHAR(60)  NULL,
+            tem_contrato          TINYINT(1)   NOT NULL DEFAULT 0,
+            qtd_conservadora      INT          NOT NULL DEFAULT 0,
+            segmentacao_cliente   VARCHAR(60)  NULL,
+            canal_cliente         VARCHAR(60)  NULL,
+            hierarquia            VARCHAR(120) NULL,
+            filial                VARCHAR(60)  NULL,
+            territory_number      INT          NULL,
+            vendedor_id           INT          NULL,
+            importacao_id         CHAR(36)     NULL,
+            created_at            TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at            TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY uq_cliente_historico_periodo (customer_number, mes_numero, ano),
+            KEY idx_cliente_historico_periodo (mes_numero, ano)
+        )
+    `;
+    try {
+        await pool.query(sql);
+        console.log('[DB] Tabela clientes_historico_mensal verificada/criada.');
+    } catch (err: any) {
+        console.error('[DB] Falha ao garantir tabela clientes_historico_mensal:', err?.message || err);
+    }
+}
+
+export { pool, query, withTransaction, testConnection, ensurePerformanceIndexes, ensureClientesHistoricoTable };
 
