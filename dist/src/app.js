@@ -75,6 +75,10 @@ app.use("/api/auth", (0, import_express_rate_limit.default)({
 }));
 app.use(import_express.default.json({ limit: "5mb" }));
 app.use(import_express.default.urlencoded({ extended: true, limit: "5mb" }));
+app.use("/api", (_req, res, next) => {
+  res.set("Cache-Control", "no-store");
+  next();
+});
 app.use("/api/auth", import_authRoutes.default);
 app.use("/api/dashboard", import_dashboardRoutes.default);
 app.use("/api/clientes", import_clientesRoutes.default);

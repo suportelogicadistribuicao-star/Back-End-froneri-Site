@@ -23,6 +23,7 @@ module.exports = __toCommonJS(dashboardRoutes_exports);
 var import_express = require("express");
 var import_database = require("../config/database");
 var import_auth = require("../middleware/auth");
+var import_clientesHistoricoService = require("../services/clientesHistoricoService");
 const router = (0, import_express.Router)();
 router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req, res) => {
   try {
@@ -58,6 +59,30 @@ router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req,
       pedidosParams.push(filtroVendedor);
       pedidosWhere += ` AND vendedor_id = $${pedidosParams.length}`;
     }
+    const usarHistoricoClientes = await (0, import_clientesHistoricoService.hasRupturaForPeriodo)(mes, ano);
+    const clientesKPIQuery = usarHistoricoClientes ? `
+                SELECT
+                    COUNT(DISTINCT r.customer_number) AS total_ativos,
+                    COUNT(DISTINCT CASE WHEN r.status_ruptura = 'C/ Compra'    THEN r.customer_number END) AS com_compra,
+                    COUNT(DISTINCT CASE WHEN r.status_ruptura = 'Cliente Novo' THEN r.customer_number END) AS novos,
+                    COUNT(DISTINCT CASE WHEN r.status_ruptura LIKE '%6 Meses%' THEN r.customer_number END) AS criticos,
+                    COUNT(DISTINCT CASE WHEN c.tem_contrato = TRUE THEN r.customer_number END) AS com_contrato
+                FROM ruptura r
+                LEFT JOIN clientes c ON c.customer_number = r.customer_number
+                WHERE r.mes_numero = $1 AND r.ano = $2
+                ${filtroVendedor ? "AND r.vendedor_id = $3" : ""}
+            ` : `
+                SELECT
+                    COUNT(*) AS total_ativos,
+                    COUNT(CASE WHEN nova_rup = 'C/ Compra'    THEN 1 END) AS com_compra,
+                    COUNT(CASE WHEN nova_rup = 'Cliente Novo' THEN 1 END) AS novos,
+                    COUNT(CASE WHEN nova_rup LIKE '%6 Meses%' THEN 1 END) AS criticos,
+                    COUNT(CASE WHEN tem_contrato = TRUE        THEN 1 END) AS com_contrato
+                FROM clientes
+                WHERE status = 'C'
+                ${filtroVendedor ? "AND vendedor_id = $1" : ""}
+            `;
+    const clientesKPIParams = usarHistoricoClientes ? filtroVendedor ? [mes, ano, filtroVendedor] : [mes, ano] : filtroVendedor ? [filtroVendedor] : [];
     const [
       vendasKPI,
       rupturaKPI,
@@ -84,18 +109,7 @@ router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req,
                 ${rupturaWhere}
                 ${rupturaWhere ? "AND" : "WHERE"} status_ruptura != 'C/ Compra'
             `, rupturaParams),
-      // KPIs de Clientes Ativos — base atual, não filtra por mes/ano
-      (0, import_database.query)(`
-                SELECT
-                    COUNT(*) AS total_ativos,
-                    COUNT(CASE WHEN nova_rup = 'C/ Compra'    THEN 1 END) AS com_compra,
-                    COUNT(CASE WHEN nova_rup = 'Cliente Novo' THEN 1 END) AS novos,
-                    COUNT(CASE WHEN nova_rup LIKE '%6 Meses%' THEN 1 END) AS criticos,
-                    COUNT(CASE WHEN tem_contrato = TRUE        THEN 1 END) AS com_contrato
-                FROM clientes
-                WHERE status = 'C'
-                ${filtroVendedor ? "AND vendedor_id = $1" : ""}
-            `, filtroVendedor ? [filtroVendedor] : []),
+      (0, import_database.query)(clientesKPIQuery, clientesKPIParams),
       (0, import_database.query)(`
                 SELECT
                     COUNT(DISTINCT customer_number) AS clientes_com_pedido,
@@ -146,7 +160,7 @@ router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req,
       periodo: { mes, ano },
       vendas: vendasKPI.rows[0],
       ruptura: rupturaKPI.rows[0],
-      clientes: clientesKPI.rows[0],
+      clientes: { ...clientesKPI.rows[0], _fonte: usarHistoricoClientes ? "historico" : "atual" },
       pedidos: pedidosKPI.rows[0],
       devedores: devedoresKPI.rows[0],
       vendasPorCategoria: vendasCategoria.rows,
