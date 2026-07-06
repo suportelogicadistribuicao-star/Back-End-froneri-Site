@@ -259,6 +259,7 @@ async function processarRelatorioVendas(filePath, _usuarioId, logId) {
     erros: 0
   };
   const errosLog = [];
+  let periodoRelatorio;
   try {
     const wb = readWorkbook(filePath);
     const vendasSheet = sheetToRowsFlexible(wb, "Base Vendas", ["Base vendas", "Vendas"]);
@@ -267,7 +268,7 @@ async function processarRelatorioVendas(filePath, _usuarioId, logId) {
     const vendasRows = vendasSheet.rows;
     const pedidosRows = pedidosSheet.rows;
     const rupturaRows = rupturaSheet.rows;
-    const periodoRelatorio = inferPeriodoRelatorio(filePath, vendasRows, pedidosRows);
+    periodoRelatorio = inferPeriodoRelatorio(filePath, vendasRows, pedidosRows);
     if (vendasRows.length === 0 && pedidosRows.length === 0 && rupturaRows.length === 0) {
       const disponiveis = Object.keys(wb?.Sheets || {}).join(", ");
       throw new Error(
@@ -282,7 +283,7 @@ async function processarRelatorioVendas(filePath, _usuarioId, logId) {
       periodo: `${periodoRelatorio.mes}/${periodoRelatorio.ano}`
     });
     if (rupturaRows.length > 0) {
-      const clienteResult = await importarClientesDaBase(rupturaRows, vendedoresMap);
+      const clienteResult = await importarClientesDaBase(rupturaRows, vendedoresMap, periodoRelatorio, logId);
       contadores.clientes += clienteResult.clientesInseridos;
       if (clienteResult.erros.length > 0) {
         contadores.erros += clienteResult.erros.length;
@@ -631,12 +632,12 @@ async function processarRelatorioVendas(filePath, _usuarioId, logId) {
         }
       }
     }
-    await finalizarLog(logId, "concluido", contadores, errosLog);
+    await finalizarLog(logId, "concluido", contadores, errosLog, periodoRelatorio);
     console.log("[import/vendas] Importa\xE7\xE3o conclu\xEDda:", contadores);
     return { sucesso: true, logId, contadores };
   } catch (err) {
     try {
-      await finalizarLog(logId, "erro", contadores, [...errosLog, err.message]);
+      await finalizarLog(logId, "erro", contadores, [...errosLog, err.message], periodoRelatorio);
     } catch (logErr) {
       console.error("[import] Falha ao finalizar log de erro:", logErr.message);
     }
@@ -653,7 +654,7 @@ async function iniciarImportacaoRelatorioVendas(filePath, usuarioId) {
   const promise = processarRelatorioVendas(filePath, usuarioId, logId);
   return { logId, promise };
 }
-async function importarClientesDaBase(rows, vendedoresMap) {
+async function importarClientesDaBase(rows, vendedoresMap, periodoRelatorio, logId) {
   const COLS = [
     "customer_number",
     "customer_name",
@@ -687,11 +688,33 @@ async function importarClientesDaBase(rows, vendedoresMap) {
     "ruptura_garoto"
   ];
   const ON_DUP = "customer_name=VALUES(customer_name),cnpj=COALESCE(VALUES(cnpj),cnpj),logradouro=COALESCE(VALUES(logradouro),logradouro),bairro=COALESCE(VALUES(bairro),bairro),postal_code=COALESCE(VALUES(postal_code),postal_code),city=COALESCE(VALUES(city),city),region=COALESCE(VALUES(region),region),filial=COALESCE(VALUES(filial),filial),canal_cliente=COALESCE(VALUES(canal_cliente),canal_cliente),hierarquia=COALESCE(VALUES(hierarquia),hierarquia),hierarquia_code=COALESCE(VALUES(hierarquia_code),hierarquia_code),segmentacao_cliente=COALESCE(VALUES(segmentacao_cliente),segmentacao_cliente),categoria_code24=COALESCE(VALUES(categoria_code24),categoria_code24),payment_terms=COALESCE(VALUES(payment_terms),payment_terms),credit_limit=COALESCE(VALUES(credit_limit),credit_limit),telefone=COALESCE(VALUES(telefone),telefone),gln_number=COALESCE(VALUES(gln_number),gln_number),additional_tax_id=COALESCE(VALUES(additional_tax_id),additional_tax_id),status=VALUES(status),nova_rup=COALESCE(VALUES(nova_rup),nova_rup),tem_contrato=VALUES(tem_contrato),qtd_conservadora=COALESCE(VALUES(qtd_conservadora),qtd_conservadora),codigo_hierarquia=COALESCE(VALUES(codigo_hierarquia),codigo_hierarquia),descricao1=COALESCE(VALUES(descricao1),descricao1),codigo_setor=COALESCE(VALUES(codigo_setor),codigo_setor),territory_number=COALESCE(VALUES(territory_number),territory_number),territory_description=COALESCE(VALUES(territory_description),territory_description),vendedor_id=COALESCE(VALUES(vendedor_id),vendedor_id),ruptura_garoto=COALESCE(VALUES(ruptura_garoto),ruptura_garoto),updated_at=NOW()";
+  const HIST_COLS = [
+    "customer_number",
+    "mes_referencia",
+    "mes_numero",
+    "ano",
+    "customer_name",
+    "cnpj",
+    "city",
+    "status",
+    "nova_rup",
+    "tem_contrato",
+    "qtd_conservadora",
+    "segmentacao_cliente",
+    "canal_cliente",
+    "hierarquia",
+    "filial",
+    "territory_number",
+    "vendedor_id",
+    "importacao_id"
+  ];
+  const HIST_ON_DUP = "customer_name=VALUES(customer_name),cnpj=VALUES(cnpj),city=VALUES(city),status=VALUES(status),nova_rup=VALUES(nova_rup),tem_contrato=VALUES(tem_contrato),qtd_conservadora=VALUES(qtd_conservadora),segmentacao_cliente=VALUES(segmentacao_cliente),canal_cliente=VALUES(canal_cliente),hierarquia=VALUES(hierarquia),filial=VALUES(filial),territory_number=VALUES(territory_number),vendedor_id=VALUES(vendedor_id),importacao_id=VALUES(importacao_id),updated_at=NOW()";
   let clientesInseridos = 0;
   const erros = [];
   for (let i = 0; i < rows.length; i += IMPORT_CHUNK_SIZE) {
     const chunk = rows.slice(i, i + IMPORT_CHUNK_SIZE);
     const params = [];
+    const histParams = [];
     let rowCount = 0;
     for (const row of chunk) {
       const customerNumber = normNum(row["Customer Number"] || row["Sold"] || row["SOLD"]);
@@ -740,11 +763,34 @@ async function importarClientesDaBase(rows, vendedoresMap) {
         vendedorId,
         norm(row["Ruptura Garoto"])
       );
+      histParams.push(
+        customerNumber,
+        periodoRelatorio.mesReferencia,
+        periodoRelatorio.mes,
+        periodoRelatorio.ano,
+        norm(col(row, "Customer Name", "Raz\xE3o Social")),
+        norm(row["CNPJ"]),
+        norm(col(row, "City", "Cidade")),
+        normStatus(row["Status"]),
+        norm(row["Nova Rup"]),
+        norm(row["C/ Contrato?"]) === "Sim",
+        normNum(row["Qtd Conservadora"]) || 0,
+        norm(row["SEGMENTA\xC7\xC3O CLIENTE"]),
+        norm(row["Canal Cliente"]),
+        normDesc(row["Category Code 23 Description"]),
+        norm(row["Filial"]),
+        normNum(description2),
+        vendedorId,
+        logId
+      );
       rowCount++;
     }
     if (rowCount === 0) continue;
     try {
-      await (0, import_database.query)(bulkSql("clientes", COLS, rowCount, ON_DUP), params);
+      await (0, import_database.withTransaction)(async (client) => {
+        await client.query(bulkSql("clientes", COLS, rowCount, ON_DUP), params);
+        await client.query(bulkSql("clientes_historico_mensal", HIST_COLS, rowCount, HIST_ON_DUP), histParams);
+      });
       clientesInseridos += rowCount;
       console.log(`[import/clientes] chunk ${i}: ${rowCount} cliente(s) upsertado(s)`);
     } catch (e) {
@@ -762,7 +808,7 @@ async function criarLog(filePath, tipoArquivo, usuarioId) {
     `, [logId, import_path.default.basename(filePath), tipoArquivo, usuarioId]);
   return logId;
 }
-async function finalizarLog(logId, status, contadores, erros) {
+async function finalizarLog(logId, status, contadores, erros, periodo) {
   const truncated = erros.length > 100;
   const logEntries = truncated ? [...erros.slice(0, 100), `... e mais ${erros.length - 100} erro(s) n\xE3o exibido(s)`] : erros;
   const logText = logEntries.length > 0 ? logEntries.join("\n") : null;
@@ -776,8 +822,11 @@ async function finalizarLog(logId, status, contadores, erros) {
             registros_pedidos  = $5,
             registros_erros    = $6,
             log_erros          = $7,
+            mes_referencia     = $8,
+            mes_numero         = $9,
+            ano                = $10,
             finished_at        = NOW()
-        WHERE id = $8
+        WHERE id = $11
     `, [
     status,
     totalLinhasVendas,
@@ -786,6 +835,9 @@ async function finalizarLog(logId, status, contadores, erros) {
     contadores.pedidos || 0,
     contadores.erros || 0,
     logText,
+    periodo?.mesReferencia ?? null,
+    periodo?.mes ?? null,
+    periodo?.ano ?? null,
     logId
   ]);
 }

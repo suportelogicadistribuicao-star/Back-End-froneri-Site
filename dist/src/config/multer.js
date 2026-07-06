@@ -29,17 +29,25 @@ var multer_exports = {};
 __export(multer_exports, {
   UPLOAD_DIR: () => UPLOAD_DIR,
   default: () => multer_default,
+  ensureUploadDir: () => ensureUploadDir,
   limparArquivosAntigos: () => limparArquivosAntigos
 });
 module.exports = __toCommonJS(multer_exports);
 var import_multer = __toESM(require("multer"));
+var import_os = __toESM(require("os"));
 var import_path = __toESM(require("path"));
 var import_fs = __toESM(require("fs"));
 var import_uploadPolicy = require("./uploadPolicy");
-const UPLOAD_DIR = process.env.UPLOAD_DIR || "./uploads";
-if (!import_fs.default.existsSync(UPLOAD_DIR)) import_fs.default.mkdirSync(UPLOAD_DIR, { recursive: true });
+const UPLOAD_DIR = process.env.UPLOAD_DIR || import_path.default.join(import_os.default.tmpdir(), "froneri-uploads");
+function ensureUploadDir() {
+  if (!import_fs.default.existsSync(UPLOAD_DIR)) import_fs.default.mkdirSync(UPLOAD_DIR, { recursive: true });
+}
+ensureUploadDir();
 const storage = import_multer.default.diskStorage({
-  destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
+  destination: (_req, _file, cb) => {
+    ensureUploadDir();
+    cb(null, UPLOAD_DIR);
+  },
   filename: (_req, file, cb) => {
     const ts = Date.now();
     const safe = file.originalname.replace(/[^a-z0-9._-]/gi, "_");
@@ -61,6 +69,7 @@ const upload = (0, import_multer.default)({
 });
 const UPLOAD_STALE_MINUTES = parseInt(process.env.UPLOAD_STALE_MINUTES || "60", 10);
 function limparArquivosAntigos() {
+  ensureUploadDir();
   const limiteMs = UPLOAD_STALE_MINUTES * 60 * 1e3;
   const agora = Date.now();
   for (const nome of import_fs.default.readdirSync(UPLOAD_DIR)) {
@@ -80,5 +89,6 @@ var multer_default = upload;
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   UPLOAD_DIR,
+  ensureUploadDir,
   limparArquivosAntigos
 });

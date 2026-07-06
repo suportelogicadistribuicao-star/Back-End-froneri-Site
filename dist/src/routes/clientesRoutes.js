@@ -23,6 +23,7 @@ module.exports = __toCommonJS(clientesRoutes_exports);
 var import_express = require("express");
 var import_database = require("../config/database");
 var import_auth = require("../middleware/auth");
+var import_clientesHistoricoService = require("../services/clientesHistoricoService");
 const router = (0, import_express.Router)();
 function pickClienteFields(body) {
   const allowed = [
@@ -91,13 +92,28 @@ router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req,
       nova_rup,
       cidade,
       vendedor_id,
-      status = "C",
-      com_ruptura
+      status,
+      com_ruptura,
+      mes,
+      ano
     } = req.query;
     const offset = (Number(page) - 1) * Number(limit);
-    const where = ["c.status = $1"];
-    const params = [status];
-    let p = 2;
+    const periodoInformado = mes !== void 0 && mes !== "" && ano !== void 0 && ano !== "";
+    const mesNum = periodoInformado ? Number(mes) : null;
+    const anoNum = periodoInformado ? Number(ano) : null;
+    const usarHistorico = periodoInformado && await (0, import_clientesHistoricoService.hasSnapshotForPeriodo)(mesNum, anoNum);
+    const tabela = usarHistorico ? "clientes_historico_mensal" : "clientes";
+    const where = [];
+    const params = [];
+    let p = 1;
+    if (usarHistorico) {
+      where.push(`c.mes_numero = $${p++} AND c.ano = $${p++}`);
+      params.push(mesNum, anoNum);
+    }
+    if (status !== void 0 && status !== null && String(status).trim() !== "") {
+      where.push(`c.status = $${p++}`);
+      params.push(status);
+    }
     const fvId = req.filtroVendedor || vendedor_id;
     if (fvId) {
       where.push(`c.vendedor_id = $${p++}`);
@@ -130,27 +146,28 @@ router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req,
       params.push(`%${cidade}%`);
     }
     if (com_ruptura === "true") {
-      const mesAtual = (/* @__PURE__ */ new Date()).getMonth() + 1;
-      const anoAtual = (/* @__PURE__ */ new Date()).getFullYear();
-      params.push(mesAtual, anoAtual);
+      const now = /* @__PURE__ */ new Date();
+      const mesRup = mesNum ?? now.getMonth() + 1;
+      const anoRup = anoNum ?? now.getFullYear();
+      params.push(mesRup, anoRup);
       where.push(`EXISTS (
                 SELECT 1 FROM ruptura r
                 WHERE r.customer_number = c.customer_number
                   AND r.mes_numero = $${p++} AND r.ano = $${p++}
             )`);
     }
-    const whereClause = "WHERE " + where.join(" AND ");
+    const whereClause = where.length ? `WHERE ${where.join(" AND ")}` : "";
     const limitIdx = p;
     const offsetIdx = p + 1;
+    const camposSemHistorico = usarHistorico ? "NULL AS telefone, NULL AS payment_terms, NULL AS credit_limit, NULL AS logradouro, NULL AS bairro, NULL AS postal_code, NULL AS codigo_setor" : "c.telefone, c.payment_terms, c.credit_limit, c.logradouro, c.bairro, c.postal_code, c.codigo_setor";
     const [total, rows] = await Promise.all([
-      (0, import_database.query)(`SELECT COUNT(*) AS count FROM clientes c ${whereClause}`, params),
+      (0, import_database.query)(`SELECT COUNT(*) AS count FROM ${tabela} c ${whereClause}`, params),
       (0, import_database.query)(`
                 SELECT
                     c.customer_number, c.customer_name, c.cnpj, c.city,
                     c.canal_cliente, c.segmentacao_cliente, c.nova_rup, c.status,
-                    c.telefone, c.tem_contrato, c.qtd_conservadora,
-                    c.payment_terms, c.credit_limit, c.logradouro, c.bairro,
-                    c.postal_code, c.hierarquia, c.codigo_setor,
+                    c.tem_contrato, c.qtd_conservadora, c.hierarquia,
+                    ${camposSemHistorico},
                     v.nome AS vendedor_nome, v.setor AS vendedor_setor,
                     rot.dia_semana, rot.frequencia, rot.sequencia,
                     CASE
@@ -160,7 +177,7 @@ router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req,
                         WHEN c.nova_rup LIKE '%6 Meses%' THEN 'CR\xCDTICO'
                         ELSE 'INDEFINIDO'
                     END AS status_compra
-                FROM clientes c
+                FROM ${tabela} c
                 LEFT JOIN vendedores v   ON v.id = c.vendedor_id
                 LEFT JOIN roteirizacao rot ON rot.customer_number = c.customer_number AND rot.ativa = TRUE
                 ${whereClause}
@@ -172,7 +189,8 @@ router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req,
       total: Number(total.rows[0].count),
       pagina: Number(page),
       limite: Number(limit),
-      dados: rows.rows
+      dados: rows.rows,
+      ...periodoInformado ? { periodo: { mes: mesNum, ano: anoNum, fonte: usarHistorico ? "historico" : "atual" } } : {}
     });
   } catch (err) {
     console.error("[clientes/list]", err);
@@ -221,7 +239,7 @@ router.get("/exportar/csv", import_auth.authMiddleware, import_auth.ownDataOnly,
 router.get("/:id", import_auth.authMiddleware, import_auth.ownDataOnly, async (req, res) => {
   try {
     const id = Number(req.params.id);
-    const [cliente, vendas, ruptura, pedidos] = await Promise.all([
+    const [cliente, vendas, ruptura, pedidos, historicoCadastral] = await Promise.all([
       (0, import_database.query)(`
                 SELECT c.*, v.nome AS vendedor_nome, v.setor, v.codigo_vendedor,
                        rot.dia_semana, rot.frequencia, rot.sequencia, rot.visitas_semana
@@ -250,6 +268,18 @@ router.get("/:id", import_auth.authMiddleware, import_auth.ownDataOnly, async (r
                 WHERE customer_number = $1
                 ORDER BY order_date DESC
                 LIMIT 20
+            `, [id]),
+      // Snapshot mensal do cadastro — como o cliente estava em cada mês
+      // (status, nova_rup, tem_contrato etc.), diferente do estado atual
+      // acima (cliente.rows[0]), que só reflete a última importação.
+      (0, import_database.query)(`
+                SELECT mes_referencia, mes_numero, ano, status, nova_rup, tem_contrato,
+                       qtd_conservadora, segmentacao_cliente, canal_cliente, hierarquia,
+                       filial, vendedor_id
+                FROM clientes_historico_mensal
+                WHERE customer_number = $1
+                ORDER BY ano DESC, mes_numero DESC
+                LIMIT 12
             `, [id])
     ]);
     if (cliente.rows.length === 0) {
@@ -259,6 +289,7 @@ router.get("/:id", import_auth.authMiddleware, import_auth.ownDataOnly, async (r
       ...cliente.rows[0],
       historico_vendas: vendas.rows,
       historico_ruptura: ruptura.rows,
+      historico_cadastral: historicoCadastral.rows,
       pedidos_carteira: pedidos.rows
     });
   } catch (err) {
