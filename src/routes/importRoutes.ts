@@ -4,7 +4,7 @@ import path from 'path';
 import { pipeline } from 'stream/promises';
 import { HeadObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { authMiddleware, requireRole } from '../middleware/auth';
-import upload, { UPLOAD_DIR, limparArquivosAntigos } from '../config/multer';
+import upload, { UPLOAD_DIR, limparArquivosAntigos, ensureUploadDir } from '../config/multer';
 import { s3Client, B2_BUCKET, PRESIGN_EXPIRES_SECONDS, getPresignedPutUrl } from '../config/b2';
 import { ALLOWED_EXTENSIONS, UPLOAD_MAX_SIZE_MB } from '../config/uploadPolicy';
 import { importarRelatorioVendas, iniciarImportacaoRelatorioVendas } from '../services/importService';
@@ -149,6 +149,7 @@ router.post('/confirmar', ...protegido, async (req, res) => {
         }
 
         const getResult = await s3Client.send(new GetObjectCommand({ Bucket: B2_BUCKET, Key: key }));
+        ensureUploadDir();
         localFilePath = path.join(UPLOAD_DIR, `${Date.now()}_${path.basename(key)}`);
         console.log(`[import/confirmar] baixando para ${localFilePath}`);
         await pipeline(getResult.Body as NodeJS.ReadableStream, fs.createWriteStream(localFilePath));

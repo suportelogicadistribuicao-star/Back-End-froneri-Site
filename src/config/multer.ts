@@ -9,10 +9,22 @@ import { ALLOWED_EXTENSIONS, UPLOAD_MAX_SIZE_MB } from './uploadPolicy';
 // diretório do app, o que derrubava a requisição no meio do download do B2
 // quando UPLOAD_DIR era relativo (./uploads, dentro da pasta observada).
 export const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(os.tmpdir(), 'froneri-uploads');
-if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+
+// Alguns provedores de hospedagem compartilhada limpam periodicamente o /tmp
+// (inclusive a própria pasta, não só os arquivos dentro dela). Como o processo
+// Node fica de pé por muito tempo, não basta criar a pasta uma vez no boot —
+// ela precisa ser garantida a cada uso.
+export function ensureUploadDir(): void {
+    if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+}
+
+ensureUploadDir();
 
 const storage = multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
+    destination: (_req, _file, cb) => {
+        ensureUploadDir();
+        cb(null, UPLOAD_DIR);
+    },
     filename: (_req, file, cb) => {
         const ts   = Date.now();
         const safe = file.originalname.replace(/[^a-z0-9._-]/gi, '_');
@@ -41,6 +53,7 @@ const UPLOAD_STALE_MINUTES = parseInt(process.env.UPLOAD_STALE_MINUTES || '60', 
 // no meio de uma importação, antes do fs.unlinkSync da rota rodar). Não mexe
 // em arquivos recentes, para não afetar uma importação concorrente em andamento.
 export function limparArquivosAntigos(): void {
+    ensureUploadDir();
     const limiteMs = UPLOAD_STALE_MINUTES * 60 * 1000;
     const agora = Date.now();
     for (const nome of fs.readdirSync(UPLOAD_DIR)) {
