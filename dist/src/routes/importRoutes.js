@@ -33,7 +33,6 @@ module.exports = __toCommonJS(importRoutes_exports);
 var import_express = require("express");
 var import_fs = __toESM(require("fs"));
 var import_path = __toESM(require("path"));
-var import_promises = require("stream/promises");
 var import_client_s3 = require("@aws-sdk/client-s3");
 var import_auth = require("../middleware/auth");
 var import_multer = __toESM(require("../config/multer"));
@@ -43,11 +42,11 @@ var import_importService = require("../services/importService");
 var import_database = require("../config/database");
 const router = (0, import_express.Router)();
 const protegido = [import_auth.authMiddleware, (0, import_auth.requireRole)("admin", "gerente")];
-async function processarImportacaoEResponder(localFilePath, usuarioId, sync, res) {
+async function processarImportacaoEResponder(filePath, usuarioId, sync, res, fileBuffer) {
   try {
     if (sync) {
-      const resultado = await (0, import_importService.importarRelatorioVendas)(localFilePath, usuarioId);
-      (0, import_multer.limparArquivosAntigos)();
+      const resultado = await (0, import_importService.importarRelatorioVendas)(filePath, usuarioId, fileBuffer);
+      if (!fileBuffer) (0, import_multer.limparArquivosAntigos)();
       res.json({
         mensagem: "Relat\xF3rio de Vendas importado com sucesso.",
         importacaoId: resultado.logId,
@@ -55,15 +54,15 @@ async function processarImportacaoEResponder(localFilePath, usuarioId, sync, res
       });
       return;
     }
-    const { logId, promise } = await (0, import_importService.iniciarImportacaoRelatorioVendas)(localFilePath, usuarioId);
+    const { logId, promise } = await (0, import_importService.iniciarImportacaoRelatorioVendas)(filePath, usuarioId, fileBuffer);
     promise.then(() => {
       console.log(`[import/vendas] Importa\xE7\xE3o conclu\xEDda. logId=${logId}`);
-      (0, import_multer.limparArquivosAntigos)();
+      if (!fileBuffer) (0, import_multer.limparArquivosAntigos)();
     }).catch((err) => {
       console.error(`[import/vendas] Falha na importa\xE7\xE3o em background. logId=${logId}`, err);
     }).finally(() => {
-      if (import_fs.default.existsSync(localFilePath)) {
-        import_fs.default.unlinkSync(localFilePath);
+      if (!fileBuffer && import_fs.default.existsSync(filePath)) {
+        import_fs.default.unlinkSync(filePath);
       }
     });
     res.status(202).json({
@@ -75,8 +74,8 @@ async function processarImportacaoEResponder(localFilePath, usuarioId, sync, res
     console.error("[import/vendas]", err);
     res.status(500).json({ erro: `Erro na importa\xE7\xE3o: ${err.message}` });
   } finally {
-    if (sync && import_fs.default.existsSync(localFilePath)) {
-      import_fs.default.unlinkSync(localFilePath);
+    if (!fileBuffer && sync && import_fs.default.existsSync(filePath)) {
+      import_fs.default.unlinkSync(filePath);
     }
   }
 }
@@ -121,7 +120,8 @@ router.post("/confirmar", ...protegido, async (req, res) => {
   if (!import_uploadPolicy.ALLOWED_EXTENSIONS.includes(ext)) {
     return res.status(400).json({ erro: `Formato n\xE3o suportado: ${ext}. Use ${import_uploadPolicy.ALLOWED_EXTENSIONS.join(", ")}` });
   }
-  let localFilePath;
+  const nomeArquivo = import_path.default.basename(key);
+  let fileBuffer;
   try {
     let head;
     try {
@@ -140,11 +140,9 @@ router.post("/confirmar", ...protegido, async (req, res) => {
       return res.status(413).json({ erro: `Arquivo excede o tamanho m\xE1ximo de ${import_uploadPolicy.UPLOAD_MAX_SIZE_MB}MB.` });
     }
     const getResult = await import_b2.s3Client.send(new import_client_s3.GetObjectCommand({ Bucket: import_b2.B2_BUCKET, Key: key }));
-    (0, import_multer.ensureUploadDir)();
-    localFilePath = import_path.default.join(import_multer.UPLOAD_DIR, `${Date.now()}_${import_path.default.basename(key)}`);
-    console.log(`[import/confirmar] baixando para ${localFilePath}`);
-    await (0, import_promises.pipeline)(getResult.Body, import_fs.default.createWriteStream(localFilePath));
-    console.log(`[import/confirmar] download conclu\xEDdo. ${localFilePath}`);
+    console.log(`[import/confirmar] baixando para mem\xF3ria. arquivo=${nomeArquivo}`);
+    fileBuffer = Buffer.from(await getResult.Body.transformToByteArray());
+    console.log(`[import/confirmar] download conclu\xEDdo. arquivo=${nomeArquivo} bytes=${fileBuffer.length}`);
     import_b2.s3Client.send(new import_client_s3.DeleteObjectCommand({ Bucket: import_b2.B2_BUCKET, Key: key })).catch((err) => {
       console.error("[B2] Falha ao remover objeto ap\xF3s download:", err.message);
     });
@@ -152,11 +150,11 @@ router.post("/confirmar", ...protegido, async (req, res) => {
     console.error(`[import/confirmar] Erro ao baixar arquivo do B2. key=${key}`, err);
     return res.status(500).json({ erro: `Erro ao baixar arquivo do armazenamento tempor\xE1rio: ${err.message}` });
   }
-  console.log(`[import/confirmar] iniciando processamento. arquivo=${localFilePath}`);
+  console.log(`[import/confirmar] iniciando processamento. arquivo=${nomeArquivo}`);
   try {
-    await processarImportacaoEResponder(localFilePath, String(req.usuario.id), sync, res);
+    await processarImportacaoEResponder(nomeArquivo, String(req.usuario.id), sync, res, fileBuffer);
   } catch (err) {
-    console.error(`[import/confirmar] Erro n\xE3o tratado ao processar importa\xE7\xE3o. arquivo=${localFilePath}`, err);
+    console.error(`[import/confirmar] Erro n\xE3o tratado ao processar importa\xE7\xE3o. arquivo=${nomeArquivo}`, err);
     if (!res.headersSent) {
       res.status(500).json({ erro: `Erro ao processar importa\xE7\xE3o: ${err.message}` });
     }

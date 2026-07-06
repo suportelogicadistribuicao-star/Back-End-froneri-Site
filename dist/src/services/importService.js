@@ -193,10 +193,10 @@ function inferPeriodoRelatorio(filePath, vendasRows, pedidosRows) {
     total: 0
   };
 }
-function readWorkbook(filePath) {
+function readWorkbook(filePath, fileBuffer) {
   const ext = import_path.default.extname(filePath).toLowerCase();
   const opts = { type: "buffer", cellDates: true };
-  const buffer = import_fs.default.readFileSync(filePath);
+  const buffer = fileBuffer ?? import_fs.default.readFileSync(filePath);
   if (ext === ".xlsb") {
     return XLSX.read(buffer, { ...opts, type: "buffer" });
   }
@@ -266,7 +266,7 @@ const HIST_COLS = [
   "vendedor_id",
   "importacao_id"
 ];
-async function processarRelatorioVendas(filePath, _usuarioId, logId) {
+async function processarRelatorioVendas(filePath, _usuarioId, logId, fileBuffer) {
   const vendedoresMap = await loadVendedoresMap();
   const contadores = {
     vendas: 0,
@@ -281,7 +281,7 @@ async function processarRelatorioVendas(filePath, _usuarioId, logId) {
   const errosLog = [];
   let periodoRelatorio;
   try {
-    const wb = readWorkbook(filePath);
+    const wb = readWorkbook(filePath, fileBuffer);
     const vendasSheet = sheetToRowsFlexible(wb, "Base Vendas", ["Base vendas", "Vendas"]);
     const pedidosSheet = sheetToRowsFlexible(wb, "Base Ordens Carteira", ["Base Ordens de Carteira", "Ordens Carteira"]);
     const rupturaSheet = sheetToRowsFlexible(wb, "Base Ruptura", ["Ruptura", "Base ruptura"]);
@@ -702,14 +702,14 @@ async function processarRelatorioVendas(filePath, _usuarioId, logId) {
     throw err;
   }
 }
-async function importarRelatorioVendas(filePath, usuarioId) {
+async function importarRelatorioVendas(filePath, usuarioId, fileBuffer) {
   const logId = await criarLog(filePath, "froneri_vendas", usuarioId);
-  const resultado = await processarRelatorioVendas(filePath, usuarioId, logId);
+  const resultado = await processarRelatorioVendas(filePath, usuarioId, logId, fileBuffer);
   return { ...resultado, logId };
 }
-async function iniciarImportacaoRelatorioVendas(filePath, usuarioId) {
+async function iniciarImportacaoRelatorioVendas(filePath, usuarioId, fileBuffer) {
   const logId = await criarLog(filePath, "froneri_vendas", usuarioId);
-  const promise = processarRelatorioVendas(filePath, usuarioId, logId);
+  const promise = processarRelatorioVendas(filePath, usuarioId, logId, fileBuffer);
   return { logId, promise };
 }
 async function importarClientesDaBase(rows, vendedoresMap, periodoRelatorio, logId) {
