@@ -22,10 +22,12 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 var import_config = require("dotenv/config");
 var import_app = __toESM(require("./src/app"));
+var import_database = require("./src/config/database");
 const PORT = parseInt(
   process.env.PORT_DIST_SERVER || "21062"
 );
 async function start() {
+  await (0, import_database.ensureClientesHistoricoTable)();
   import_app.default.listen(PORT, "0.0.0.0", () => {
     console.log(`[SERVER] ERP Froneri rodando na porta ${PORT}`);
     console.log(`[SERVER] Ambiente: ${process.env.NODE_ENV || "development"}`);

@@ -95,6 +95,9 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
         const periodoInformado = mes !== undefined && mes !== '' && ano !== undefined && ano !== '';
         const mesNum = periodoInformado ? Number(mes) : null;
         const anoNum = periodoInformado ? Number(ano) : null;
+        if (periodoInformado && (!Number.isInteger(mesNum) || mesNum! < 1 || mesNum! > 12 || !Number.isInteger(anoNum))) {
+            return res.status(400).json({ erro: 'Parâmetros mes/ano inválidos.' });
+        }
         const usarHistorico = periodoInformado && await hasSnapshotForPeriodo(mesNum as number, anoNum as number);
         const tabela = usarHistorico ? 'clientes_historico_mensal' : 'clientes';
 
