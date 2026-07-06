@@ -246,6 +246,26 @@ function bulkSql(table, cols, rowCount, onDup) {
   const rowPlaceholder = `(${cols.map(() => "?").join(",")})`;
   return `INSERT INTO ${table} (${cols.join(",")}) VALUES ` + Array(rowCount).fill(rowPlaceholder).join(",") + ` ON DUPLICATE KEY UPDATE ${onDup}`;
 }
+const HIST_COLS = [
+  "customer_number",
+  "mes_referencia",
+  "mes_numero",
+  "ano",
+  "customer_name",
+  "cnpj",
+  "city",
+  "status",
+  "nova_rup",
+  "tem_contrato",
+  "qtd_conservadora",
+  "segmentacao_cliente",
+  "canal_cliente",
+  "hierarquia",
+  "filial",
+  "territory_number",
+  "vendedor_id",
+  "importacao_id"
+];
 async function processarRelatorioVendas(filePath, _usuarioId, logId) {
   const vendedoresMap = await loadVendedoresMap();
   const contadores = {
@@ -362,6 +382,7 @@ async function processarRelatorioVendas(filePath, _usuarioId, logId) {
         "vendedor_id"
       ];
       const CLI_VENDAS_ON_DUP = "customer_name=VALUES(customer_name),updated_at=NOW()";
+      const HIST_VENDAS_ON_DUP = "customer_name=VALUES(customer_name),cnpj=COALESCE(VALUES(cnpj),cnpj),city=COALESCE(VALUES(city),city),segmentacao_cliente=COALESCE(VALUES(segmentacao_cliente),segmentacao_cliente),canal_cliente=COALESCE(VALUES(canal_cliente),canal_cliente),hierarquia=COALESCE(VALUES(hierarquia),hierarquia),filial=COALESCE(VALUES(filial),filial),vendedor_id=COALESCE(VALUES(vendedor_id),vendedor_id),importacao_id=VALUES(importacao_id),updated_at=NOW()";
       const VENDA_COLS = [
         "customer_number",
         "customer_name",
@@ -428,6 +449,7 @@ async function processarRelatorioVendas(filePath, _usuarioId, logId) {
         const chunk = vendasRows.slice(i, i + IMPORT_CHUNK_SIZE);
         const cliParams = [];
         const vendaParams = [];
+        const histParams = [];
         let chunkVendas = 0, chunkAmostras = 0, chunkDevolucoes = 0, chunkOutros = 0;
         let skipped = 0;
         for (const row of chunk) {
@@ -450,20 +472,52 @@ async function processarRelatorioVendas(filePath, _usuarioId, logId) {
             console.warn(`[import/vendas] Vendedor n\xE3o encontrado \u2014 Description2="${row["Description 2"]}" customer=${customerNumber}`);
           }
           const codItem = norm(row["COD_ITEM"]);
+          const customerName = norm(row["Customer Name"]);
+          const cnpj = norm(row["CNPJ"]);
+          const city = norm(row["City"]);
+          const canalCliente = norm(row["Canal Cliente"]);
+          const hierarquia = norm(row["Hierarquia.Description"]);
+          const segmentacao = norm(row["SEGMENTA\xC7\xC3O CLIENTE"]);
+          const filial = norm(row["Filial"]);
           cliParams.push(
             customerNumber,
-            norm(row["Customer Name"]),
-            norm(row["CNPJ"]),
-            norm(row["City"]),
-            norm(row["Canal Cliente"]),
-            norm(row["Hierarquia.Description"]),
-            norm(row["SEGMENTA\xC7\xC3O CLIENTE"]),
-            norm(row["Filial"]),
+            customerName,
+            cnpj,
+            city,
+            canalCliente,
+            hierarquia,
+            segmentacao,
+            filial,
             vendedorId
+          );
+          histParams.push(
+            customerNumber,
+            periodoRelatorio.mesReferencia,
+            periodoRelatorio.mes,
+            periodoRelatorio.ano,
+            customerName,
+            cnpj,
+            city,
+            normStatus(null),
+            // sem dado de status na Base Vendas — default 'C', só usado se a linha ainda não existir
+            null,
+            // nova_rup — desconhecido pela Base Vendas
+            false,
+            // tem_contrato — idem
+            0,
+            // qtd_conservadora — idem
+            segmentacao,
+            canalCliente,
+            hierarquia,
+            filial,
+            null,
+            // territory_number — só a Base Ruptura informa
+            vendedorId,
+            logId
           );
           vendaParams.push(
             customerNumber,
-            norm(row["Customer Name"]),
+            customerName,
             vendedorId,
             norm(row["Vendedor.Description"]),
             normNum(row["N\xFAmero NF"]),
@@ -483,12 +537,12 @@ async function processarRelatorioVendas(filePath, _usuarioId, logId) {
             normNum(col(row, "SomaDeValor NF", "Valor NF", "ValorNF")),
             normNum(col(row, "SomaDeValor VBC", "Valor VBC", "ValorVBC")),
             statusVenda,
-            norm(row["Canal Cliente"]),
-            norm(row["Hierarquia.Description"]),
-            norm(row["SEGMENTA\xC7\xC3O CLIENTE"]),
-            norm(row["Filial"]),
-            norm(row["City"]),
-            norm(row["CNPJ"]),
+            canalCliente,
+            hierarquia,
+            segmentacao,
+            filial,
+            city,
+            cnpj,
             import_path.default.basename(filePath),
             logId
           );
@@ -507,6 +561,10 @@ async function processarRelatorioVendas(filePath, _usuarioId, logId) {
             await client.query(
               bulkSql("clientes", CLI_VENDAS_COLS, rowCount, CLI_VENDAS_ON_DUP),
               cliParams
+            );
+            await client.query(
+              bulkSql("clientes_historico_mensal", HIST_COLS, rowCount, HIST_VENDAS_ON_DUP),
+              histParams
             );
             await client.query(
               bulkSql("vendas", VENDA_COLS, rowCount, VENDA_ON_DUP),
@@ -688,27 +746,7 @@ async function importarClientesDaBase(rows, vendedoresMap, periodoRelatorio, log
     "ruptura_garoto"
   ];
   const ON_DUP = "customer_name=VALUES(customer_name),cnpj=COALESCE(VALUES(cnpj),cnpj),logradouro=COALESCE(VALUES(logradouro),logradouro),bairro=COALESCE(VALUES(bairro),bairro),postal_code=COALESCE(VALUES(postal_code),postal_code),city=COALESCE(VALUES(city),city),region=COALESCE(VALUES(region),region),filial=COALESCE(VALUES(filial),filial),canal_cliente=COALESCE(VALUES(canal_cliente),canal_cliente),hierarquia=COALESCE(VALUES(hierarquia),hierarquia),hierarquia_code=COALESCE(VALUES(hierarquia_code),hierarquia_code),segmentacao_cliente=COALESCE(VALUES(segmentacao_cliente),segmentacao_cliente),categoria_code24=COALESCE(VALUES(categoria_code24),categoria_code24),payment_terms=COALESCE(VALUES(payment_terms),payment_terms),credit_limit=COALESCE(VALUES(credit_limit),credit_limit),telefone=COALESCE(VALUES(telefone),telefone),gln_number=COALESCE(VALUES(gln_number),gln_number),additional_tax_id=COALESCE(VALUES(additional_tax_id),additional_tax_id),status=VALUES(status),nova_rup=COALESCE(VALUES(nova_rup),nova_rup),tem_contrato=VALUES(tem_contrato),qtd_conservadora=COALESCE(VALUES(qtd_conservadora),qtd_conservadora),codigo_hierarquia=COALESCE(VALUES(codigo_hierarquia),codigo_hierarquia),descricao1=COALESCE(VALUES(descricao1),descricao1),codigo_setor=COALESCE(VALUES(codigo_setor),codigo_setor),territory_number=COALESCE(VALUES(territory_number),territory_number),territory_description=COALESCE(VALUES(territory_description),territory_description),vendedor_id=COALESCE(VALUES(vendedor_id),vendedor_id),ruptura_garoto=COALESCE(VALUES(ruptura_garoto),ruptura_garoto),updated_at=NOW()";
-  const HIST_COLS = [
-    "customer_number",
-    "mes_referencia",
-    "mes_numero",
-    "ano",
-    "customer_name",
-    "cnpj",
-    "city",
-    "status",
-    "nova_rup",
-    "tem_contrato",
-    "qtd_conservadora",
-    "segmentacao_cliente",
-    "canal_cliente",
-    "hierarquia",
-    "filial",
-    "territory_number",
-    "vendedor_id",
-    "importacao_id"
-  ];
-  const HIST_ON_DUP = "customer_name=VALUES(customer_name),cnpj=VALUES(cnpj),city=VALUES(city),status=VALUES(status),nova_rup=VALUES(nova_rup),tem_contrato=VALUES(tem_contrato),qtd_conservadora=VALUES(qtd_conservadora),segmentacao_cliente=VALUES(segmentacao_cliente),canal_cliente=VALUES(canal_cliente),hierarquia=VALUES(hierarquia),filial=VALUES(filial),territory_number=VALUES(territory_number),vendedor_id=VALUES(vendedor_id),importacao_id=VALUES(importacao_id),updated_at=NOW()";
+  const HIST_ON_DUP = "customer_name=VALUES(customer_name),cnpj=COALESCE(VALUES(cnpj),cnpj),city=COALESCE(VALUES(city),city),status=VALUES(status),nova_rup=COALESCE(VALUES(nova_rup),nova_rup),tem_contrato=VALUES(tem_contrato),qtd_conservadora=COALESCE(VALUES(qtd_conservadora),qtd_conservadora),segmentacao_cliente=COALESCE(VALUES(segmentacao_cliente),segmentacao_cliente),canal_cliente=COALESCE(VALUES(canal_cliente),canal_cliente),hierarquia=COALESCE(VALUES(hierarquia),hierarquia),filial=COALESCE(VALUES(filial),filial),territory_number=COALESCE(VALUES(territory_number),territory_number),vendedor_id=COALESCE(VALUES(vendedor_id),vendedor_id),importacao_id=VALUES(importacao_id),updated_at=NOW()";
   let clientesInseridos = 0;
   const erros = [];
   for (let i = 0; i < rows.length; i += IMPORT_CHUNK_SIZE) {
@@ -730,35 +768,47 @@ async function importarClientesDaBase(rows, vendedoresMap, periodoRelatorio, log
         console.warn(`[import/clientes] Vendedor n\xE3o encontrado \u2014 customer=${customerNumber} Description2="${description2}" C\xF3digo="${codigoSetor}"`);
       }
       const paymentTerms = norm(col(row, "Payment Terms", "Descri\xE7\xE3o"));
+      const customerName = norm(col(row, "Customer Name", "Raz\xE3o Social"));
+      const cnpj = norm(row["CNPJ"]);
+      const city = norm(col(row, "City", "Cidade"));
+      const filial = norm(row["Filial"]);
+      const canalCliente = norm(row["Canal Cliente"]);
+      const hierarquia = normDesc(row["Category Code 23 Description"]);
+      const segmentacao = norm(row["SEGMENTA\xC7\xC3O CLIENTE"]);
+      const status = normStatus(row["Status"]);
+      const novaRup = norm(row["Nova Rup"]);
+      const temContrato = norm(row["C/ Contrato?"]) === "Sim";
+      const qtdConservadora = normNum(row["Qtd Conservadora"]) || 0;
+      const territoryNumber = normNum(description2);
       params.push(
         customerNumber,
-        norm(col(row, "Customer Name", "Raz\xE3o Social")),
-        norm(row["CNPJ"]),
+        customerName,
+        cnpj,
         norm(col(row, "Address Line 2", "Endere\xE7o")),
         norm(col(row, "Address Line 4", "Bairro")),
         norm(row["Postal Code"]),
-        norm(col(row, "City", "Cidade")),
+        city,
         norm(row["Regi\xE3o"]),
         // null se não informado — sem default 'Minas Gerais'
-        norm(row["Filial"]),
-        norm(row["Canal Cliente"]),
-        normDesc(row["Category Code 23 Description"]),
+        filial,
+        canalCliente,
+        hierarquia,
         normDesc(row["Category Code 13 Description"]),
-        norm(row["SEGMENTA\xC7\xC3O CLIENTE"]),
+        segmentacao,
         norm(row["Category Code 24"]),
         paymentTerms,
         normNum(row["Credit Limit"]),
         norm(row["Telefone"]),
         normNum(row["GLN Number"]),
         norm(row["Additional Tax ID"]),
-        normStatus(row["Status"]),
-        norm(row["Nova Rup"]),
-        norm(row["C/ Contrato?"]) === "Sim",
-        normNum(row["Qtd Conservadora"]) || 0,
+        status,
+        novaRup,
+        temContrato,
+        qtdConservadora,
         normNum(row["C\xF3digo Hierarquia"]),
         norm(row["Descri\xE7\xE3o 1"]),
         codigoSetor,
-        normNum(description2),
+        territoryNumber,
         vendedorDesc,
         vendedorId,
         norm(row["Ruptura Garoto"])
@@ -768,18 +818,18 @@ async function importarClientesDaBase(rows, vendedoresMap, periodoRelatorio, log
         periodoRelatorio.mesReferencia,
         periodoRelatorio.mes,
         periodoRelatorio.ano,
-        norm(col(row, "Customer Name", "Raz\xE3o Social")),
-        norm(row["CNPJ"]),
-        norm(col(row, "City", "Cidade")),
-        normStatus(row["Status"]),
-        norm(row["Nova Rup"]),
-        norm(row["C/ Contrato?"]) === "Sim",
-        normNum(row["Qtd Conservadora"]) || 0,
-        norm(row["SEGMENTA\xC7\xC3O CLIENTE"]),
-        norm(row["Canal Cliente"]),
-        normDesc(row["Category Code 23 Description"]),
-        norm(row["Filial"]),
-        normNum(description2),
+        customerName,
+        cnpj,
+        city,
+        status,
+        novaRup,
+        temContrato,
+        qtdConservadora,
+        segmentacao,
+        canalCliente,
+        hierarquia,
+        filial,
+        territoryNumber,
         vendedorId,
         logId
       );

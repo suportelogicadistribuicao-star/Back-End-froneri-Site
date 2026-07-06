@@ -101,6 +101,9 @@ router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req,
     const periodoInformado = mes !== void 0 && mes !== "" && ano !== void 0 && ano !== "";
     const mesNum = periodoInformado ? Number(mes) : null;
     const anoNum = periodoInformado ? Number(ano) : null;
+    if (periodoInformado && (!Number.isInteger(mesNum) || mesNum < 1 || mesNum > 12 || !Number.isInteger(anoNum))) {
+      return res.status(400).json({ erro: "Par\xE2metros mes/ano inv\xE1lidos." });
+    }
     const usarHistorico = periodoInformado && await (0, import_clientesHistoricoService.hasSnapshotForPeriodo)(mesNum, anoNum);
     const tabela = usarHistorico ? "clientes_historico_mensal" : "clientes";
     const where = [];
