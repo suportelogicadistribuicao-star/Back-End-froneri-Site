@@ -104,11 +104,13 @@ router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req,
                 ${vendaWhere}
             `, p),
       (0, import_database.query)(`
-                SELECT COUNT(DISTINCT customer_number) AS total_ruptura
-                FROM ruptura
-                ${rupturaWhere}
-                ${rupturaWhere ? "AND" : "WHERE"} status_ruptura != 'C/ Compra'
-            `, rupturaParams),
+    SELECT COUNT(DISTINCT r.customer_number) AS total_ruptura
+    FROM ruptura r
+    JOIN clientes c ON c.customer_number = r.customer_number
+    ${rupturaWhere.replace(/\bano\b/g, "r.ano").replace(/\bmes_numero\b/g, "r.mes_numero").replace(/\bvendedor_id\b/g, "r.vendedor_id")}
+    AND c.status = 'C'
+    AND r.status_ruptura NOT IN ('C/ Compra', 'Cliente Novo', 'SEM KV')
+`, rupturaParams),
       (0, import_database.query)(clientesKPIQuery, clientesKPIParams),
       (0, import_database.query)(`
                 SELECT

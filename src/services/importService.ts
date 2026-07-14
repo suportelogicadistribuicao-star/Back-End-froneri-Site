@@ -84,11 +84,22 @@ const normStatusVenda = (v: unknown): 'VENDA' | 'AMOSTRA GRATIS' | 'DEVOLUCAO' |
     return 'OUTRO';
 };
 
-const normNum = (v: unknown): number | null => {
-    if (v === null || v === undefined || v === '') return null;
-    const n = parseFloat(String(v));
-    return isNaN(n) ? null : n;
-};
+function parseNumberLike(v: unknown): number | null {
+    if (v === null || v === undefined) return null;
+    if (typeof v === 'number') return isNaN(v) ? null : v;
+
+    const s = String(v).trim();
+    if (!s || s === '-' || s === '–' || s === '—') return null;
+
+    const normalized = s.includes(',')
+        ? (s.includes('.') ? s.replace(/\./g, '').replace(',', '.') : s.replace(',', '.'))
+        : s;
+    const n = Number(normalized);
+    return Number.isNaN(n) ? null : n;
+}
+
+const normNum = (v: unknown): number | null => parseNumberLike(v);
+const normNumZero = (v: unknown): number => parseNumberLike(v) ?? 0;
 
 const normDate = (v: unknown): string | null => {
     if (!v) return null;
@@ -605,11 +616,11 @@ async function processarRelatorioVendas(filePath: string, _usuarioId: string, lo
                         norm(row['SUBCATEGORIA']),
                         norm(row['Segmento SKU']),
                         norm(row['Categoria TOTAL SKU']),
-                        normNum(col(row, 'SomaDeCaixas', 'Soma Caixas', 'Caixas')),
-                        normNum(col(row, 'SomaDePallets', 'Soma Pallets', 'Pallets')),
-                        normNum(col(row, 'SomaDeLitros', 'Soma Litros', 'Litros')),
-                        normNum(col(row, 'SomaDeValor NF', 'Valor NF', 'ValorNF')),
-                        normNum(col(row, 'SomaDeValor VBC', 'Valor VBC', 'ValorVBC')),
+                        normNumZero(col(row, 'SomaDeCaixas', 'Soma Caixas', 'Caixas')),
+                        normNumZero(col(row, 'SomaDePallets', 'Soma Pallets', 'Pallets')),
+                        normNumZero(col(row, 'SomaDeLitros', 'Soma Litros', 'Litros')),
+                        normNumZero(col(row, 'SomaDeValor NF', 'Valor NF', 'ValorNF')),
+                        normNumZero(col(row, 'SomaDeValor VBC', 'Valor VBC', 'ValorVBC')),
                         statusVenda,
                         canalCliente,
                         hierarquia,

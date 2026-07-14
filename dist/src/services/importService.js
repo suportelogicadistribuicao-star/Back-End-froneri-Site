@@ -76,11 +76,17 @@ const normStatusVenda = (v) => {
   if (s.startsWith("DEVOLU")) return "DEVOLUCAO";
   return "OUTRO";
 };
-const normNum = (v) => {
-  if (v === null || v === void 0 || v === "") return null;
-  const n = parseFloat(String(v));
-  return isNaN(n) ? null : n;
-};
+function parseNumberLike(v) {
+  if (v === null || v === void 0) return null;
+  if (typeof v === "number") return isNaN(v) ? null : v;
+  const s = String(v).trim();
+  if (!s || s === "-" || s === "\u2013" || s === "\u2014") return null;
+  const normalized = s.includes(",") ? s.includes(".") ? s.replace(/\./g, "").replace(",", ".") : s.replace(",", ".") : s;
+  const n = Number(normalized);
+  return Number.isNaN(n) ? null : n;
+}
+const normNum = (v) => parseNumberLike(v);
+const normNumZero = (v) => parseNumberLike(v) ?? 0;
 const normDate = (v) => {
   if (!v) return null;
   if (v instanceof Date) return isNaN(v.getTime()) ? null : v.toISOString().split("T")[0];
@@ -531,11 +537,11 @@ async function processarRelatorioVendas(filePath, _usuarioId, logId, fileBuffer)
             norm(row["SUBCATEGORIA"]),
             norm(row["Segmento SKU"]),
             norm(row["Categoria TOTAL SKU"]),
-            normNum(col(row, "SomaDeCaixas", "Soma Caixas", "Caixas")),
-            normNum(col(row, "SomaDePallets", "Soma Pallets", "Pallets")),
-            normNum(col(row, "SomaDeLitros", "Soma Litros", "Litros")),
-            normNum(col(row, "SomaDeValor NF", "Valor NF", "ValorNF")),
-            normNum(col(row, "SomaDeValor VBC", "Valor VBC", "ValorVBC")),
+            normNumZero(col(row, "SomaDeCaixas", "Soma Caixas", "Caixas")),
+            normNumZero(col(row, "SomaDePallets", "Soma Pallets", "Pallets")),
+            normNumZero(col(row, "SomaDeLitros", "Soma Litros", "Litros")),
+            normNumZero(col(row, "SomaDeValor NF", "Valor NF", "ValorNF")),
+            normNumZero(col(row, "SomaDeValor VBC", "Valor VBC", "ValorVBC")),
             statusVenda,
             canalCliente,
             hierarquia,
