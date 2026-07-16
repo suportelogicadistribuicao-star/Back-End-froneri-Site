@@ -4,6 +4,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { query, withTransaction } from '../config/database';
 import { authMiddleware, requireRole } from '../middleware/auth';
+import { randomUUID } from 'crypto';
 
 const router = Router();
 const JWT_SECRET = process.env.JWT_SECRET as string;
@@ -208,13 +209,13 @@ router.post('/register-vendedor', authMiddleware, requireRole('admin'), async (r
         const senhaHash = await bcrypt.hash(String(senha), 12);
 
         const resultado = await withTransaction(async (client) => {
-            const usuarioCriadoInsert = await client.query(
-                `INSERT INTO usuarios (nome, email, senha_hash, role, ativo)
-                 VALUES ($1, $2, $3, 'vendedor', TRUE)`,
-                [nomeFinal, emailNormalizado, senhaHash]
-            );
+            const usuarioId = randomUUID();
 
-            const usuarioId = usuarioCriadoInsert.insertId;
+            await client.query(
+                `INSERT INTO usuarios (id, nome, email, senha_hash, role, ativo)
+                VALUES ($1, $2, $3, $4, 'vendedor', TRUE)`,
+                [usuarioId, nomeFinal, emailNormalizado, senhaHash]
+            );
 
             const usuarioCriado = await client.query(
                 'SELECT id, nome, email, role, ativo FROM usuarios WHERE id = $1',
@@ -230,10 +231,7 @@ router.post('/register-vendedor', authMiddleware, requireRole('admin'), async (r
                 throw new Error('Não foi possível vincular o usuário ao vendedor.');
             }
 
-            return {
-                usuario: usuarioCriado.rows[0],
-                vendedor: { id: vendedor.id, nome: vendedor.nome }
-            };
+            return { usuario: usuarioCriado.rows[0], vendedor: { id: vendedor.id, nome: vendedor.nome } };
         });
 
         return res.status(201).json({

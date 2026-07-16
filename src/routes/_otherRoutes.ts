@@ -94,9 +94,16 @@ const rotRouter = express.Router();
 
 rotRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
     try {
-        const { vendedor_id, dia_semana, page = 1, limit = 500, ordenar_por_nome } = req.query;
+        const {
+            vendedor_id,
+            codigo_vendedor,
+            dia_semana,
+            page = 1,
+            limit = 500,
+            ordenar_por_nome,
+        } = req.query;
         const fvId = req.filtroVendedor || vendedor_id;
-        const params = [];
+        const params: any[] = [];
         const where = ['rot.ativa = TRUE'];
         let p = 1;
 
@@ -104,8 +111,10 @@ rotRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
         const limitNum = Math.min(Math.max(Number(limit) || 500, 1), 2000);
         const offset = (pageNum - 1) * limitNum;
 
-        if (fvId)      { where.push(`rot.vendedor_id = $${p++}`);   params.push(fvId); }
-        if (dia_semana){ where.push(`rot.dia_semana = $${p++}`);    params.push(dia_semana); }
+        if (fvId)            { where.push(`rot.vendedor_id = $${p++}`);      params.push(fvId); }
+        // Filtro por código do vendedor (o front envia codigo_vendedor, não vendedor_id).
+        if (codigo_vendedor) { where.push(`v.codigo_vendedor = $${p++}`);    params.push(codigo_vendedor); }
+        if (dia_semana)      { where.push(`rot.dia_semana = $${p++}`);       params.push(dia_semana); }
 
         const orderByNome = String(ordenar_por_nome || '').toLowerCase() === 'true';
         const orderBySql = orderByNome
@@ -129,6 +138,7 @@ rotRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
 
         res.json(rows.rows);
     } catch (err) {
+        console.error('[roteirizacao/get]', err);
         res.status(500).json({ erro: 'Erro ao listar roteirização.' });
     }
 });
@@ -198,9 +208,10 @@ rotRouter.post('/', authMiddleware, async (req, res) => {
             [customer_number]
         );
 
+        // RETURNING id: o driver do Postgres não popula result.insertId.
         const result = await query(`
             INSERT INTO roteirizacao (customer_number, vendedor_id, dia_semana, frequencia, ativa)
-            VALUES ($1, $2, $3, $4, TRUE)
+            VALUES (?, ?, ?, ?, TRUE)
         `, [customer_number, vendedor_id, dia_semana, frequencia]);
 
         res.status(201).json({ mensagem: 'Roteirização criada.', id: result.insertId });
@@ -228,7 +239,7 @@ rotRouter.put('/:id', authMiddleware, async (req, res) => {
             vendedor_id = vendedor.rows[0].id;
         }
 
-        await query(`
+        const result = await query(`
             UPDATE roteirizacao SET
                 customer_number = COALESCE($1, customer_number),
                 vendedor_id     = COALESCE($2, vendedor_id),
@@ -237,6 +248,10 @@ rotRouter.put('/:id', authMiddleware, async (req, res) => {
             WHERE id = $5
         `, [customer_number ?? null, vendedor_id ?? null, dia_semana ?? null, frequencia ?? null, id]);
 
+        if (result.rowCount === 0) {
+            return res.status(404).json({ erro: 'Roteirização não encontrada.' });
+        }
+
         res.json({ mensagem: 'Roteirização atualizada.' });
     } catch (err) {
         console.error('[roteirizacao/put]', err);
@@ -244,12 +259,82 @@ rotRouter.put('/:id', authMiddleware, async (req, res) => {
     }
 });
 
+// IMPORTANTE: rotas específicas precisam vir ANTES de '/:id',
+// senão o Express casa '/cliente/...' com o parâmetro :id.
+
+// Remove um cliente de TODAS as rotas ativas de um vendedor específico.
+rotRouter.delete('/cliente/:customerNumber/vendedor/:codigoVendedor', authMiddleware, async (req, res) => {
+    try {
+        const customerNumber = Number(req.params.customerNumber);
+        if (!Number.isFinite(customerNumber) || customerNumber <= 0) {
+            return res.status(400).json({ erro: 'Número de cliente inválido.' });
+        }
+
+        const codigoVendedor = String(req.params.codigoVendedor || '').trim();
+        if (!codigoVendedor) {
+            return res.status(400).json({ erro: 'Código de vendedor inválido.' });
+        }
+
+// Cliente + vendedor
+        const result = await query(`
+            UPDATE roteirizacao rot
+            JOIN vendedores v ON v.id = rot.vendedor_id
+            SET rot.ativa = FALSE
+            WHERE rot.customer_number = ?
+            AND v.codigo_vendedor = ?
+            AND rot.ativa = TRUE
+        `, [customerNumber, codigoVendedor]);
+
+        if (result.affectedRows === 0) {
+            return res.status(404).json({ erro: 'Nenhuma rota ativa encontrada para este cliente neste vendedor.' });
+        }
+        res.json({ mensagem: 'Cliente removido das rotas.', removidas: result.affectedRows });
+    } catch (err) {
+        console.error('[roteirizacao/delete-cliente]', err);
+        res.status(500).json({ erro: 'Erro ao remover cliente das rotas.' });
+    }
+});
+
+// Remove um cliente de TODAS as rotas ativas, independente do vendedor.
+rotRouter.delete('/cliente/:customerNumber', authMiddleware, async (req, res) => {
+    try {
+        const customerNumber = Number(req.params.customerNumber);
+        if (!Number.isFinite(customerNumber) || customerNumber <= 0) {
+            return res.status(400).json({ erro: 'Número de cliente inválido.' });
+        }
+
+        const result = await query(
+            'UPDATE roteirizacao SET ativa = FALSE WHERE customer_number = $1 AND ativa = TRUE',
+            [customerNumber]
+        );
+
+        if (result.rowCount === 0) {
+            return res.status(404).json({ erro: 'Nenhuma rota ativa encontrada para este cliente.' });
+        }
+
+        res.json({ mensagem: 'Cliente removido das rotas.', removidas: result.rowCount });
+    } catch (err) {
+        console.error('[roteirizacao/delete-cliente-global]', err);
+        res.status(500).json({ erro: 'Erro ao remover cliente das rotas.' });
+    }
+});
+
+// Remove UMA roteirização específica pelo id.
 rotRouter.delete('/:id', authMiddleware, async (req, res) => {
     try {
         const id = Number(req.params.id);
-        if (!Number.isFinite(id)) return res.status(400).json({ erro: 'ID inválido.' });
-        await query('UPDATE roteirizacao SET ativa = FALSE WHERE id = $1', [id]);
-        res.json({ mensagem: 'Roteirização removida.' });
+        if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ erro: 'ID inválido.' });
+
+        const result = await query(
+            'UPDATE roteirizacao SET ativa = FALSE WHERE id = $1 AND ativa = TRUE',
+            [id]
+        );
+
+        if (result.rowCount === 0) {
+            return res.status(404).json({ erro: 'Roteirização não encontrada ou já removida.' });
+        }
+
+        res.json({ mensagem: 'Roteirização removida.', removidas: result.rowCount });
     } catch (err) {
         console.error('[roteirizacao/delete]', err);
         res.status(500).json({ erro: 'Erro ao remover roteirização.' });
@@ -342,5 +427,3 @@ devRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
 });
 
 export { rupturaRouter, rotRouter, cadRouter, tickRouter, devRouter };
-
-
