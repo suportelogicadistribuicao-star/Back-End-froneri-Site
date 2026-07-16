@@ -8,6 +8,9 @@ const router = Router();
 const MES_ABREV = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
 const EVOLUTION_MONTHS = 6;
 
+// Vendedor "casa" (conta administrativa) — nunca entra em cálculo de ruptura.
+const VENDEDOR_EXCLUIDO_RUPTURA = 'adm_logica mg';
+
 function lastMonths(mes: number, ano: number, count: number) {
   const out: { mes: number; ano: number; label: string }[] = [];
   for (let i = count - 1; i >= 0; i--) {
@@ -23,7 +26,6 @@ function lastMonths(mes: number, ano: number, count: number) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /vendas/dashboard?mes=7&ano=2026&canal=OOH&agrupar=categoria&busca=x
-// Substitui as ~19 chamadas da VendasPage e toda a agregação client-side.
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
   try {
@@ -33,20 +35,19 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
       return res.status(400).json({ erro: 'Parâmetros mes/ano inválidos.' });
     }
 
-    const canal   = req.query.canal ? String(req.query.canal) : null;
+    const canal    = req.query.canal ? String(req.query.canal) : null;
     const buscaRaw = req.query.busca ? String(req.query.busca).trim() : '';
     // Escapa curingas do LIKE — senão "%" do usuário casa com tudo.
-    const busca   = buscaRaw ? buscaRaw.replace(/[\\%_]/g, '\\$&') : null;
-    const agrupar = String(req.query.agrupar ?? 'categoria') === 'vendedor' ? 'vendedor' : 'categoria';
-    const topN    = Math.min(Math.max(Number(req.query.top_n) || 10, 1), 50);
-    const fvId    = req.filtroVendedor ?? null;   // CHAR(36) UUID
+    const busca    = buscaRaw ? buscaRaw.replace(/[\\%_]/g, '\\$&') : null;
+    const agrupar  = String(req.query.agrupar ?? 'categoria') === 'vendedor' ? 'vendedor' : 'categoria';
+    const topN     = Math.min(Math.max(Number(req.query.top_n) || 10, 1), 50);
+    const fvId     = req.filtroVendedor ?? null;   // CHAR(36) UUID
 
     // Whitelist — nunca interpolar entrada do usuário em SQL.
     const grupoExpr = agrupar === 'vendedor'
       ? `TRIM(REPLACE(COALESCE(v.nome, 'Sem vendedor'), '_Logica MG', ''))`
       : `COALESCE(NULLIF(TRIM(ve.categoria), ''), 'Sem categoria')`;
 
-    // MySQL usa ? posicional; o mesmo bloco WHERE repete os params por query.
     const baseWhere = `
       WHERE ve.mes_numero   = ?
         AND ve.ano          = ?
@@ -54,23 +55,36 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
         AND (? IS NULL OR ve.vendedor_id   = ?)
         AND (? IS NULL OR ve.canal_cliente = ?)
         AND (? IS NULL OR (
-              ve.customer_name              LIKE CONCAT('%', ?, '%')
+              ve.customer_name                 LIKE CONCAT('%', ?, '%')
            OR CAST(ve.customer_number AS CHAR) LIKE CONCAT('%', ?, '%')
-           OR v.nome                        LIKE CONCAT('%', ?, '%')
-           OR ve.descricao_produto          LIKE CONCAT('%', ?, '%')
+           OR v.nome                           LIKE CONCAT('%', ?, '%')
+           OR ve.descricao_produto             LIKE CONCAT('%', ?, '%')
         ))
     `;
     const baseParams = [mes, ano, fvId, fvId, canal, canal, busca, busca, busca, busca, busca];
 
     const months = lastMonths(mes, ano, EVOLUTION_MONTHS);
-    // (mes,ano) IN ((1,2026),(2,2026),...) — substitui o UNNEST do Postgres.
     const periodoIn = months.map(() => '(?, ?)').join(', ');
     const periodoParams = months.flatMap(m => [m.mes, m.ano]);
 
-    const [kpisQ, resumoQ, clientesQ, evolucaoQ] = await Promise.all([
+    // Mesmo bloco de filtros das queries por período (janela de 6 meses).
+    // IMPORTANTE: a `busca` agora TAMBÉM é aplicada aqui — antes o gráfico de
+    // evolução ignorava o filtro por SOLD/cliente/produto.
+    const filtroPeriodoVendas = `
+        AND ve.status_venda = 'VENDA'
+        AND (? IS NULL OR ve.vendedor_id   = ?)
+        AND (? IS NULL OR ve.canal_cliente = ?)
+        AND (? IS NULL OR (
+              ve.customer_name                 LIKE CONCAT('%', ?, '%')
+           OR CAST(ve.customer_number AS CHAR) LIKE CONCAT('%', ?, '%')
+           OR v.nome                           LIKE CONCAT('%', ?, '%')
+           OR ve.descricao_produto             LIKE CONCAT('%', ?, '%')
+        ))
+    `;
+    const filtroPeriodoParams = [fvId, fvId, canal, canal, busca, busca, busca, busca, busca];
+
+    const [kpisQ, resumoQ, clientesQ, evolucaoQ, tiposMensalQ] = await Promise.all([
       // ── KPIs ────────────────────────────────────────────────────────────
-      // COUNT(DISTINCT customer_number) resolve no banco a dedup que o front
-      // fazia com Set — antes contava transação, não cliente.
       query(`
         SELECT
           COALESCE(SUM(ve.valor_nf), 0)      AS faturamento,
@@ -83,10 +97,7 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
         ${baseWhere}
       `, baseParams),
 
-      // ── Resumo: geral + Take Home + Impulso ─────────────────────────────
-      // MySQL não tem GROUPING SETS. WITH ROLLUP não serve (soma os tipos em
-      // vez de dar o geral por grupo). Uma passada por tipo + GROUPING(tipo)
-      // simulado via UNION ALL: 2 varreduras em vez das 3 do front.
+      // ── Resumo (mantido para Excel/PDF): geral + Take Home + Impulso ────
       query(`
         SELECT '__GERAL__' AS tipo, ${grupoExpr} AS grupo,
                COALESCE(SUM(ve.valor_nf), 0)      AS valor_nf,
@@ -114,7 +125,7 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
         ORDER BY valor_nf DESC
       `, [...baseParams, ...baseParams]),
 
-      // ── Ranking de clientes (completo; o front corta em topN p/ o gráfico) ──
+      // ── Ranking de clientes ──────────────────────────────────────────────
       query(`
         SELECT ve.customer_number            AS sold,
                MAX(ve.customer_name)         AS nome,
@@ -126,47 +137,93 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
         ORDER BY valor DESC
       `, baseParams),
 
-      // ── Evolução: 6 meses numa query (eram 18 requisições) ──────────────
-      // Faturamento de `vendas`; ruptura % de agg_ruptura_mensal, que já
-      // aplica a regra Froneri. LEFT JOIN: pode haver mês sem ruptura.
+      // ── Evolução: faturamento + ruptura % dos últimos 6 meses ───────────
+      // A % de ruptura agora segue EXATAMENTE a mesma lógica da página de
+      // Ruptura (fórmula da aba "Venda Vendedor" do Excel — ver rupturaExcel.ts):
+      //
+      //   Ruptura % = 100 × (1 − ComCompra ÷ base avaliada)
+      //             = 100 × rupturas ÷ base avaliada
+      //
+      //   base avaliada = registros de `ruptura` do mês, EXCLUINDO:
+      //     • status_ruptura 'Cliente Novo' e 'SEM KV' (fora da base);
+      //     • vendedor administrativo ADM_Logica MG;
+      //     • Regra Froneri: cliente desativado no mês (status 'I'/'S' no
+      //       snapshot `clientes_historico_mensal`; sem registro = ativo,
+      //       equivalente ao clienteAtivoNoMes() do front).
+      //   rupturas = base avaliada com status_ruptura <> 'C/ Compra'.
+      //
+      // Precisão: ROUND(..., 2) — antes arredondava para inteiro.
       query(`
         SELECT p.mes_numero, p.ano,
                COALESCE(f.valor, 0) AS valor,
-               COALESCE(ROUND(100 * r.rupturas / NULLIF(r.base, 0)), 0) AS ruptura_pct
+               COALESCE(ROUND(100 * rp.rupturas / NULLIF(rp.base, 0), 2), 0) AS ruptura_pct
         FROM (
           SELECT DISTINCT mes_numero, ano
           FROM vendas
           WHERE (mes_numero, ano) IN (${periodoIn})
           UNION
           SELECT DISTINCT mes_numero, ano
-          FROM agg_ruptura_mensal
+          FROM ruptura
           WHERE (mes_numero, ano) IN (${periodoIn})
         ) p
         LEFT JOIN (
           SELECT ve.mes_numero, ve.ano, COALESCE(SUM(ve.valor_nf), 0) AS valor
           FROM vendas ve
+          LEFT JOIN vendedores v ON v.id = ve.vendedor_id
           WHERE (ve.mes_numero, ve.ano) IN (${periodoIn})
-            AND ve.status_venda = 'VENDA'
-            AND (? IS NULL OR ve.vendedor_id   = ?)
-            AND (? IS NULL OR ve.canal_cliente = ?)
+            ${filtroPeriodoVendas}
           GROUP BY ve.mes_numero, ve.ano
         ) f ON f.mes_numero = p.mes_numero AND f.ano = p.ano
         LEFT JOIN (
-          SELECT a.mes_numero, a.ano,
-                 SUM(a.clientes_ruptura) AS rupturas,
-                 SUM(a.clientes_base)    AS base
-          FROM agg_ruptura_mensal a
-          WHERE (a.mes_numero, a.ano) IN (${periodoIn})
-            AND (? IS NULL OR a.vendedor_id   = ?)
-            AND (? IS NULL OR a.canal_cliente = ?)
-          GROUP BY a.mes_numero, a.ano
-        ) r ON r.mes_numero = p.mes_numero AND r.ano = p.ano
+          SELECT r.mes_numero, r.ano,
+                 SUM(CASE WHEN UPPER(TRIM(COALESCE(r.status_ruptura, ''))) NOT IN ('CLIENTE NOVO', 'SEM KV')
+                           AND UPPER(TRIM(COALESCE(r.status_ruptura, ''))) <> 'C/ COMPRA'
+                          THEN 1 ELSE 0 END) AS rupturas,
+                 SUM(CASE WHEN UPPER(TRIM(COALESCE(r.status_ruptura, ''))) NOT IN ('CLIENTE NOVO', 'SEM KV')
+                          THEN 1 ELSE 0 END) AS base
+          FROM ruptura r
+          JOIN clientes c ON c.customer_number = r.customer_number
+          LEFT JOIN vendedores v ON v.id = r.vendedor_id
+          LEFT JOIN clientes_historico_mensal h
+                 ON h.customer_number = r.customer_number
+                AND h.mes_numero      = r.mes_numero
+                AND h.ano             = r.ano
+          WHERE (r.mes_numero, r.ano) IN (${periodoIn})
+            AND LOWER(TRIM(COALESCE(v.nome, ''))) <> '${VENDEDOR_EXCLUIDO_RUPTURA}'
+            -- Regra Froneri: sem snapshot = ativo; com snapshot, só status 'C'.
+            AND (h.status IS NULL OR h.status = 'C')
+            AND (? IS NULL OR r.vendedor_id   = ?)
+            AND (? IS NULL OR c.canal_cliente = ?)
+            AND (? IS NULL OR (
+                  c.customer_name                 LIKE CONCAT('%', ?, '%')
+               OR CAST(c.customer_number AS CHAR) LIKE CONCAT('%', ?, '%')
+               OR v.nome                          LIKE CONCAT('%', ?, '%')
+            ))
+          GROUP BY r.mes_numero, r.ano
+        ) rp ON rp.mes_numero = p.mes_numero AND rp.ano = p.ano
         ORDER BY p.ano, p.mes_numero
       `, [
         ...periodoParams, ...periodoParams,
-        ...periodoParams, fvId, fvId, canal, canal,
-        ...periodoParams, fvId, fvId, canal, canal,
+        ...periodoParams, ...filtroPeriodoParams,
+        ...periodoParams, fvId, fvId, canal, canal, busca, busca, busca, busca,
       ]),
+
+      // ── NOVO: Take Home x Impulso agregados POR MÊS (últimos 6 meses) ───
+      // Substitui os dois gráficos por categoria: uma linha por mês com o
+      // total de tudo que é Take Home e tudo que é Impulso no período.
+      query(`
+        SELECT ve.mes_numero, ve.ano,
+               COALESCE(SUM(CASE WHEN UPPER(TRIM(ve.categoria_total_sku)) = 'TAKE HOME'
+                                 THEN ve.valor_nf ELSE 0 END), 0) AS take_home,
+               COALESCE(SUM(CASE WHEN UPPER(TRIM(ve.categoria_total_sku)) = 'IMPULSO'
+                                 THEN ve.valor_nf ELSE 0 END), 0) AS impulso
+        FROM vendas ve
+        LEFT JOIN vendedores v ON v.id = ve.vendedor_id
+        WHERE (ve.mes_numero, ve.ano) IN (${periodoIn})
+          ${filtroPeriodoVendas}
+        GROUP BY ve.mes_numero, ve.ano
+        ORDER BY ve.ano, ve.mes_numero
+      `, [...periodoParams, ...filtroPeriodoParams]),
     ]);
 
     // ── Monta a resposta ────────────────────────────────────────────────
@@ -205,6 +262,18 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
       };
     });
 
+    const tiposMap = new Map(
+      tiposMensalQ.rows.map((r: any) => [`${r.ano}-${r.mes_numero}`, r]),
+    );
+    const evolucaoTipos = months.map(m => {
+      const r: any = tiposMap.get(`${m.ano}-${m.mes}`);
+      return {
+        mes: m.mes, ano: m.ano, label: m.label,
+        take_home: Number(r?.take_home ?? 0),
+        impulso:   Number(r?.impulso ?? 0),
+      };
+    });
+
     res.json({
       periodo: { mes, ano, canal, agrupar },
       kpis: {
@@ -223,6 +292,7 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
       top_clientes: rankingClientes.slice(0, topN),
       ranking_clientes: rankingClientes,
       evolucao,
+      evolucao_tipos: evolucaoTipos,
     });
   } catch (err) {
     console.error('[vendas/dashboard]', err);
@@ -231,7 +301,7 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GET /vendas — transações paginadas NO BANCO (antes: .slice() no browser).
+// GET /vendas — transações paginadas NO BANCO.
 // export=true ignora a paginação (Excel/PDF), com teto de segurança.
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
@@ -257,10 +327,10 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
         AND (? IS NULL OR ve.canal_cliente       = ?)
         AND (? IS NULL OR ve.segmentacao_cliente = ?)
         AND (? IS NULL OR (
-              ve.customer_name                LIKE CONCAT('%', ?, '%')
+              ve.customer_name                 LIKE CONCAT('%', ?, '%')
            OR CAST(ve.customer_number AS CHAR) LIKE CONCAT('%', ?, '%')
-           OR v.nome                          LIKE CONCAT('%', ?, '%')
-           OR ve.descricao_produto            LIKE CONCAT('%', ?, '%')
+           OR v.nome                           LIKE CONCAT('%', ?, '%')
+           OR ve.descricao_produto             LIKE CONCAT('%', ?, '%')
         ))
     `;
     const params = [
@@ -268,7 +338,6 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
       segmentacao, segmentacao, busca, busca, busca, busca, busca,
     ];
 
-    // Colunas explícitas — `SELECT ve.*` escondia se categoria_total_sku vinha.
     const [totalQ, rowsQ] = await Promise.all([
       query(`
         SELECT COUNT(*) AS count
