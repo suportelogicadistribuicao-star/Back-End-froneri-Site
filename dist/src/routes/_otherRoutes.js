@@ -125,7 +125,14 @@ rupturaRouter.put("/:id", import_auth.authMiddleware, async (req, res) => {
 const rotRouter = import_express.default.Router();
 rotRouter.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req, res) => {
   try {
-    const { vendedor_id, dia_semana, page = 1, limit = 500, ordenar_por_nome } = req.query;
+    const {
+      vendedor_id,
+      codigo_vendedor,
+      dia_semana,
+      page = 1,
+      limit = 500,
+      ordenar_por_nome
+    } = req.query;
     const fvId = req.filtroVendedor || vendedor_id;
     const params = [];
     const where = ["rot.ativa = TRUE"];
@@ -136,6 +143,10 @@ rotRouter.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (r
     if (fvId) {
       where.push(`rot.vendedor_id = $${p++}`);
       params.push(fvId);
+    }
+    if (codigo_vendedor) {
+      where.push(`v.codigo_vendedor = $${p++}`);
+      params.push(codigo_vendedor);
     }
     if (dia_semana) {
       where.push(`rot.dia_semana = $${p++}`);
@@ -159,6 +170,7 @@ rotRouter.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (r
         `, [...params, limitNum, offset]);
     res.json(rows.rows);
   } catch (err) {
+    console.error("[roteirizacao/get]", err);
     res.status(500).json({ erro: "Erro ao listar roteiriza\xE7\xE3o." });
   }
 });
@@ -216,7 +228,7 @@ rotRouter.post("/", import_auth.authMiddleware, async (req, res) => {
     );
     const result = await (0, import_database.query)(`
             INSERT INTO roteirizacao (customer_number, vendedor_id, dia_semana, frequencia, ativa)
-            VALUES ($1, $2, $3, $4, TRUE)
+            VALUES (?, ?, ?, ?, TRUE)
         `, [customer_number, vendedor_id, dia_semana, frequencia]);
     res.status(201).json({ mensagem: "Roteiriza\xE7\xE3o criada.", id: result.insertId });
   } catch (err) {
@@ -240,7 +252,7 @@ rotRouter.put("/:id", import_auth.authMiddleware, async (req, res) => {
       }
       vendedor_id = vendedor.rows[0].id;
     }
-    await (0, import_database.query)(`
+    const result = await (0, import_database.query)(`
             UPDATE roteirizacao SET
                 customer_number = COALESCE($1, customer_number),
                 vendedor_id     = COALESCE($2, vendedor_id),
@@ -248,18 +260,73 @@ rotRouter.put("/:id", import_auth.authMiddleware, async (req, res) => {
                 frequencia      = COALESCE($4, frequencia)
             WHERE id = $5
         `, [customer_number ?? null, vendedor_id ?? null, dia_semana ?? null, frequencia ?? null, id]);
+    if (result.rowCount === 0) {
+      return res.status(404).json({ erro: "Roteiriza\xE7\xE3o n\xE3o encontrada." });
+    }
     res.json({ mensagem: "Roteiriza\xE7\xE3o atualizada." });
   } catch (err) {
     console.error("[roteirizacao/put]", err);
     res.status(500).json({ erro: "Erro ao atualizar roteiriza\xE7\xE3o." });
   }
 });
+rotRouter.delete("/cliente/:customerNumber/vendedor/:codigoVendedor", import_auth.authMiddleware, async (req, res) => {
+  try {
+    const customerNumber = Number(req.params.customerNumber);
+    if (!Number.isFinite(customerNumber) || customerNumber <= 0) {
+      return res.status(400).json({ erro: "N\xFAmero de cliente inv\xE1lido." });
+    }
+    const codigoVendedor = String(req.params.codigoVendedor || "").trim();
+    if (!codigoVendedor) {
+      return res.status(400).json({ erro: "C\xF3digo de vendedor inv\xE1lido." });
+    }
+    const result = await (0, import_database.query)(`
+            UPDATE roteirizacao rot
+            JOIN vendedores v ON v.id = rot.vendedor_id
+            SET rot.ativa = FALSE
+            WHERE rot.customer_number = ?
+            AND v.codigo_vendedor = ?
+            AND rot.ativa = TRUE
+        `, [customerNumber, codigoVendedor]);
+    if (result.affectedRows === 0) {
+      return res.status(404).json({ erro: "Nenhuma rota ativa encontrada para este cliente neste vendedor." });
+    }
+    res.json({ mensagem: "Cliente removido das rotas.", removidas: result.affectedRows });
+  } catch (err) {
+    console.error("[roteirizacao/delete-cliente]", err);
+    res.status(500).json({ erro: "Erro ao remover cliente das rotas." });
+  }
+});
+rotRouter.delete("/cliente/:customerNumber", import_auth.authMiddleware, async (req, res) => {
+  try {
+    const customerNumber = Number(req.params.customerNumber);
+    if (!Number.isFinite(customerNumber) || customerNumber <= 0) {
+      return res.status(400).json({ erro: "N\xFAmero de cliente inv\xE1lido." });
+    }
+    const result = await (0, import_database.query)(
+      "UPDATE roteirizacao SET ativa = FALSE WHERE customer_number = $1 AND ativa = TRUE",
+      [customerNumber]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ erro: "Nenhuma rota ativa encontrada para este cliente." });
+    }
+    res.json({ mensagem: "Cliente removido das rotas.", removidas: result.rowCount });
+  } catch (err) {
+    console.error("[roteirizacao/delete-cliente-global]", err);
+    res.status(500).json({ erro: "Erro ao remover cliente das rotas." });
+  }
+});
 rotRouter.delete("/:id", import_auth.authMiddleware, async (req, res) => {
   try {
     const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ erro: "ID inv\xE1lido." });
-    await (0, import_database.query)("UPDATE roteirizacao SET ativa = FALSE WHERE id = $1", [id]);
-    res.json({ mensagem: "Roteiriza\xE7\xE3o removida." });
+    if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ erro: "ID inv\xE1lido." });
+    const result = await (0, import_database.query)(
+      "UPDATE roteirizacao SET ativa = FALSE WHERE id = $1 AND ativa = TRUE",
+      [id]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ erro: "Roteiriza\xE7\xE3o n\xE3o encontrada ou j\xE1 removida." });
+    }
+    res.json({ mensagem: "Roteiriza\xE7\xE3o removida.", removidas: result.rowCount });
   } catch (err) {
     console.error("[roteirizacao/delete]", err);
     res.status(500).json({ erro: "Erro ao remover roteiriza\xE7\xE3o." });

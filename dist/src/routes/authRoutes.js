@@ -35,6 +35,7 @@ var import_bcryptjs = __toESM(require("bcryptjs"));
 var import_jsonwebtoken = __toESM(require("jsonwebtoken"));
 var import_database = require("../config/database");
 var import_auth = require("../middleware/auth");
+var import_crypto = require("crypto");
 const router = (0, import_express.Router)();
 const JWT_SECRET = process.env.JWT_SECRET;
 const ROLES_PERMITIDAS = ["admin", "gerente", "vendedor"];
@@ -196,12 +197,12 @@ router.post("/register-vendedor", import_auth.authMiddleware, (0, import_auth.re
     }
     const senhaHash = await import_bcryptjs.default.hash(String(senha), 12);
     const resultado = await (0, import_database.withTransaction)(async (client) => {
-      const usuarioCriadoInsert = await client.query(
-        `INSERT INTO usuarios (nome, email, senha_hash, role, ativo)
-                 VALUES ($1, $2, $3, 'vendedor', TRUE)`,
-        [nomeFinal, emailNormalizado, senhaHash]
+      const usuarioId = (0, import_crypto.randomUUID)();
+      await client.query(
+        `INSERT INTO usuarios (id, nome, email, senha_hash, role, ativo)
+                VALUES ($1, $2, $3, $4, 'vendedor', TRUE)`,
+        [usuarioId, nomeFinal, emailNormalizado, senhaHash]
       );
-      const usuarioId = usuarioCriadoInsert.insertId;
       const usuarioCriado = await client.query(
         "SELECT id, nome, email, role, ativo FROM usuarios WHERE id = $1",
         [usuarioId]
@@ -213,10 +214,7 @@ router.post("/register-vendedor", import_auth.authMiddleware, (0, import_auth.re
       if (vinculacao.rowCount !== 1) {
         throw new Error("N\xE3o foi poss\xEDvel vincular o usu\xE1rio ao vendedor.");
       }
-      return {
-        usuario: usuarioCriado.rows[0],
-        vendedor: { id: vendedor.id, nome: vendedor.nome }
-      };
+      return { usuario: usuarioCriado.rows[0], vendedor: { id: vendedor.id, nome: vendedor.nome } };
     });
     return res.status(201).json({
       mensagem: "Acesso do vendedor criado e vinculado com sucesso.",
