@@ -1,4 +1,14 @@
-// vendasRoutes.ts — MySQL 8.0
+// vendasRoutes.ts — MySQL 8.0 — v3 (views canônicas)
+//
+// MUDANÇAS DA FASE 2:
+//   • Todas as leituras de vendas passam por vw_vendas_validas
+//     (status_venda = 'VENDA' garantido pela view) — some o filtro repetido.
+//   • A % de ruptura da Evolução Mensal agora é um SELECT simples em
+//     vw_ruptura_avaliada. A regra (snapshot da Regra Froneri, exclusão de
+//     Cliente Novo / SEM KV da base, exclusão do ADM_Logica MG) mora SÓ na
+//     view — este arquivo não reimplementa mais nada em SQL.
+//   • ruptura_pct sai SEM arredondar (antes ROUND(...,2)). A formatação de
+//     exibição decide as casas decimais (fase 3).
 import { Router } from 'express';
 import { query } from '../config/database';
 import { authMiddleware, ownDataOnly } from '../middleware/auth';
@@ -7,9 +17,6 @@ const router = Router();
 
 const MES_ABREV = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
 const EVOLUTION_MONTHS = 6;
-
-// Vendedor "casa" (conta administrativa) — nunca entra em cálculo de ruptura.
-const VENDEDOR_EXCLUIDO_RUPTURA = 'adm_logica mg';
 
 function lastMonths(mes: number, ano: number, count: number) {
   const out: { mes: number; ano: number; label: string }[] = [];
@@ -48,10 +55,10 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
       ? `TRIM(REPLACE(COALESCE(v.nome, 'Sem vendedor'), '_Logica MG', ''))`
       : `COALESCE(NULLIF(TRIM(ve.categoria), ''), 'Sem categoria')`;
 
+    // vw_vendas_validas já garante status_venda = 'VENDA'.
     const baseWhere = `
-      WHERE ve.mes_numero   = ?
-        AND ve.ano          = ?
-        AND ve.status_venda = 'VENDA'
+      WHERE ve.mes_numero = ?
+        AND ve.ano        = ?
         AND (? IS NULL OR ve.vendedor_id   = ?)
         AND (? IS NULL OR ve.canal_cliente = ?)
         AND (? IS NULL OR (
@@ -68,10 +75,9 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
     const periodoParams = months.flatMap(m => [m.mes, m.ano]);
 
     // Mesmo bloco de filtros das queries por período (janela de 6 meses).
-    // IMPORTANTE: a `busca` agora TAMBÉM é aplicada aqui — antes o gráfico de
-    // evolução ignorava o filtro por SOLD/cliente/produto.
+    // A `busca` também é aplicada aqui — o gráfico de evolução respeita o
+    // filtro por SOLD/cliente/produto.
     const filtroPeriodoVendas = `
-        AND ve.status_venda = 'VENDA'
         AND (? IS NULL OR ve.vendedor_id   = ?)
         AND (? IS NULL OR ve.canal_cliente = ?)
         AND (? IS NULL OR (
@@ -92,7 +98,7 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
           COALESCE(SUM(ve.soma_litros), 0)   AS litros,
           COUNT(DISTINCT ve.customer_number) AS clientes,
           COUNT(*)                           AS transacoes
-        FROM vendas ve
+        FROM vw_vendas_validas ve
         LEFT JOIN vendedores v ON v.id = ve.vendedor_id
         ${baseWhere}
       `, baseParams),
@@ -104,7 +110,7 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
                COALESCE(SUM(ve.soma_caixas), 0)   AS caixas,
                COALESCE(SUM(ve.soma_litros), 0)   AS litros,
                COUNT(DISTINCT ve.customer_number) AS clientes
-        FROM vendas ve
+        FROM vw_vendas_validas ve
         LEFT JOIN vendedores v ON v.id = ve.vendedor_id
         ${baseWhere}
         GROUP BY grupo
@@ -116,7 +122,7 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
                COALESCE(SUM(ve.soma_caixas), 0),
                COALESCE(SUM(ve.soma_litros), 0),
                COUNT(DISTINCT ve.customer_number)
-        FROM vendas ve
+        FROM vw_vendas_validas ve
         LEFT JOIN vendedores v ON v.id = ve.vendedor_id
         ${baseWhere}
           AND TRIM(COALESCE(ve.categoria_total_sku, '')) <> ''
@@ -130,7 +136,7 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
         SELECT ve.customer_number            AS sold,
                MAX(ve.customer_name)         AS nome,
                COALESCE(SUM(ve.valor_nf), 0) AS valor
-        FROM vendas ve
+        FROM vw_vendas_validas ve
         LEFT JOIN vendedores v ON v.id = ve.vendedor_id
         ${baseWhere}
         GROUP BY ve.customer_number
@@ -138,68 +144,47 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
       `, baseParams),
 
       // ── Evolução: faturamento + ruptura % dos últimos 6 meses ───────────
-      // A % de ruptura agora segue EXATAMENTE a mesma lógica da página de
-      // Ruptura (fórmula da aba "Venda Vendedor" do Excel — ver rupturaExcel.ts):
-      //
-      //   Ruptura % = 100 × (1 − ComCompra ÷ base avaliada)
-      //             = 100 × rupturas ÷ base avaliada
-      //
-      //   base avaliada = registros de `ruptura` do mês, EXCLUINDO:
-      //     • status_ruptura 'Cliente Novo' e 'SEM KV' (fora da base);
-      //     • vendedor administrativo ADM_Logica MG;
-      //     • Regra Froneri: cliente desativado no mês (status 'I'/'S' no
-      //       snapshot `clientes_historico_mensal`; sem registro = ativo,
-      //       equivalente ao clienteAtivoNoMes() do front).
-      //   rupturas = base avaliada com status_ruptura <> 'C/ Compra'.
-      //
-      // Precisão: ROUND(..., 2) — antes arredondava para inteiro.
+      // A regra de ruptura mora em vw_ruptura_avaliada (schema v3):
+      //   base     = SUM(entra_base)   → exclui Cliente Novo / SEM KV
+      //   rupturas = SUM(eh_ruptura)   → base sem 'C/ Compra'
+      //   pct      = 100 × rupturas ÷ base — SEM arredondar.
+      // Snapshot mensal (Regra Froneri) e exclusão do ADM_Logica MG já
+      // estão aplicados dentro da view.
       query(`
         SELECT p.mes_numero, p.ano,
                COALESCE(f.valor, 0) AS valor,
-               COALESCE(ROUND(100 * rp.rupturas / NULLIF(rp.base, 0), 2), 0) AS ruptura_pct
+               COALESCE(100 * rp.rupturas / NULLIF(rp.base, 0), 0) AS ruptura_pct
         FROM (
           SELECT DISTINCT mes_numero, ano
-          FROM vendas
+          FROM vw_vendas_validas
           WHERE (mes_numero, ano) IN (${periodoIn})
           UNION
           SELECT DISTINCT mes_numero, ano
-          FROM ruptura
+          FROM vw_ruptura_avaliada
           WHERE (mes_numero, ano) IN (${periodoIn})
         ) p
         LEFT JOIN (
           SELECT ve.mes_numero, ve.ano, COALESCE(SUM(ve.valor_nf), 0) AS valor
-          FROM vendas ve
+          FROM vw_vendas_validas ve
           LEFT JOIN vendedores v ON v.id = ve.vendedor_id
           WHERE (ve.mes_numero, ve.ano) IN (${periodoIn})
             ${filtroPeriodoVendas}
           GROUP BY ve.mes_numero, ve.ano
         ) f ON f.mes_numero = p.mes_numero AND f.ano = p.ano
         LEFT JOIN (
-          SELECT r.mes_numero, r.ano,
-                 SUM(CASE WHEN UPPER(TRIM(COALESCE(r.status_ruptura, ''))) NOT IN ('CLIENTE NOVO', 'SEM KV')
-                           AND UPPER(TRIM(COALESCE(r.status_ruptura, ''))) <> 'C/ COMPRA'
-                          THEN 1 ELSE 0 END) AS rupturas,
-                 SUM(CASE WHEN UPPER(TRIM(COALESCE(r.status_ruptura, ''))) NOT IN ('CLIENTE NOVO', 'SEM KV')
-                          THEN 1 ELSE 0 END) AS base
-          FROM ruptura r
-          JOIN clientes c ON c.customer_number = r.customer_number
-          LEFT JOIN vendedores v ON v.id = r.vendedor_id
-          LEFT JOIN clientes_historico_mensal h
-                 ON h.customer_number = r.customer_number
-                AND h.mes_numero      = r.mes_numero
-                AND h.ano             = r.ano
-          WHERE (r.mes_numero, r.ano) IN (${periodoIn})
-            AND LOWER(TRIM(COALESCE(v.nome, ''))) <> '${VENDEDOR_EXCLUIDO_RUPTURA}'
-            -- Regra Froneri: sem snapshot = ativo; com snapshot, só status 'C'.
-            AND (h.status IS NULL OR h.status = 'C')
-            AND (? IS NULL OR r.vendedor_id   = ?)
-            AND (? IS NULL OR c.canal_cliente = ?)
+          SELECT ra.mes_numero, ra.ano,
+                 SUM(ra.eh_ruptura) AS rupturas,
+                 SUM(ra.entra_base) AS base
+          FROM vw_ruptura_avaliada ra
+          WHERE (ra.mes_numero, ra.ano) IN (${periodoIn})
+            AND (? IS NULL OR ra.vendedor_id   = ?)
+            AND (? IS NULL OR ra.canal_cliente = ?)
             AND (? IS NULL OR (
-                  c.customer_name                 LIKE CONCAT('%', ?, '%')
-               OR CAST(c.customer_number AS CHAR) LIKE CONCAT('%', ?, '%')
-               OR v.nome                          LIKE CONCAT('%', ?, '%')
+                  ra.customer_name                 LIKE CONCAT('%', ?, '%')
+               OR CAST(ra.customer_number AS CHAR) LIKE CONCAT('%', ?, '%')
+               OR ra.vendedor_nome                 LIKE CONCAT('%', ?, '%')
             ))
-          GROUP BY r.mes_numero, r.ano
+          GROUP BY ra.mes_numero, ra.ano
         ) rp ON rp.mes_numero = p.mes_numero AND rp.ano = p.ano
         ORDER BY p.ano, p.mes_numero
       `, [
@@ -208,16 +193,14 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
         ...periodoParams, fvId, fvId, canal, canal, busca, busca, busca, busca,
       ]),
 
-      // ── NOVO: Take Home x Impulso agregados POR MÊS (últimos 6 meses) ───
-      // Substitui os dois gráficos por categoria: uma linha por mês com o
-      // total de tudo que é Take Home e tudo que é Impulso no período.
+      // ── Take Home x Impulso agregados POR MÊS (últimos 6 meses) ─────────
       query(`
         SELECT ve.mes_numero, ve.ano,
                COALESCE(SUM(CASE WHEN UPPER(TRIM(ve.categoria_total_sku)) = 'TAKE HOME'
                                  THEN ve.valor_nf ELSE 0 END), 0) AS take_home,
                COALESCE(SUM(CASE WHEN UPPER(TRIM(ve.categoria_total_sku)) = 'IMPULSO'
                                  THEN ve.valor_nf ELSE 0 END), 0) AS impulso
-        FROM vendas ve
+        FROM vw_vendas_validas ve
         LEFT JOIN vendedores v ON v.id = ve.vendedor_id
         WHERE (ve.mes_numero, ve.ano) IN (${periodoIn})
           ${filtroPeriodoVendas}
@@ -258,6 +241,7 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
       return {
         mes: m.mes, ano: m.ano, label: m.label,
         valor: Number(r?.valor ?? 0),
+        // Valor cheio, sem arredondar — a exibição formata (fase 3).
         ruptura_pct: Number(r?.ruptura_pct ?? 0),
       };
     });
@@ -319,9 +303,9 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
     const limit  = isExport ? 50000 : Math.min(Math.max(Number(req.query.limit) || 30, 1), 500);
     const offset = isExport ? 0 : (page - 1) * limit;
 
+    // vw_vendas_validas já garante status_venda = 'VENDA'.
     const whereSql = `
-      WHERE ve.status_venda = 'VENDA'
-        AND (? IS NULL OR ve.mes_numero          = ?)
+      WHERE (? IS NULL OR ve.mes_numero          = ?)
         AND (? IS NULL OR ve.ano                 = ?)
         AND (? IS NULL OR ve.vendedor_id         = ?)
         AND (? IS NULL OR ve.canal_cliente       = ?)
@@ -341,7 +325,7 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
     const [totalQ, rowsQ] = await Promise.all([
       query(`
         SELECT COUNT(*) AS count
-        FROM vendas ve
+        FROM vw_vendas_validas ve
         LEFT JOIN vendedores v ON v.id = ve.vendedor_id
         ${whereSql}
       `, params),
@@ -352,7 +336,7 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
           ve.soma_caixas, ve.soma_litros, ve.valor_nf,
           ve.canal_cliente, ve.segmentacao_cliente, ve.city,
           v.nome AS vendedor_nome
-        FROM vendas ve
+        FROM vw_vendas_validas ve
         LEFT JOIN vendedores v ON v.id = ve.vendedor_id
         ${whereSql}
         ORDER BY ve.data_faturamento DESC, ve.customer_number, ve.numero_nf
