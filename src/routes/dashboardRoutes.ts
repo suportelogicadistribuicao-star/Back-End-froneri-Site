@@ -1,10 +1,15 @@
-
 import { Router } from 'express';
 import { query } from '../config/database';
 import { authMiddleware, ownDataOnly } from '../middleware/auth';
 import { hasRupturaForPeriodo } from '../services/clientesHistoricoService';
 
 const router = Router();
+
+// CONTRATO DE SINAL (schema v4):
+//   vw_vendas_validas   → só VENDA,     magnitude POSITIVA
+//   vw_vendas_devolucao → só DEVOLUCAO, magnitude POSITIVA
+//   liquido = validas − devolucao  ← a subtração mora AQUI, explícita.
+//   vw_vendas_liquidas  → devolução já NEGATIVA (para agregações UNION)
 
 // GET /api/dashboard?mes=6&ano=2026&canal=OOH&segmentacao=A
 router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
@@ -16,16 +21,13 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
         const segmentacao = (req.query.segmentacao as string) || null;
         const filtroVendedor = req.filtroVendedor;
 
-        // ── Filtros de vendas (vw_vendas_validas) ────────────────────────────
+        // Um único WHERE serve às três views — contrato de colunas idêntico.
         const p: unknown[] = [ano, mes];
         let vendaWhere = 'WHERE ano = $1 AND mes_numero = $2';
         if (filtroVendedor) { p.push(filtroVendedor); vendaWhere += ` AND vendedor_id = $${p.length}`; }
         if (canal)          { p.push(canal);          vendaWhere += ` AND canal_cliente = $${p.length}`; }
         if (segmentacao)    { p.push(segmentacao);    vendaWhere += ` AND segmentacao_cliente = $${p.length}`; }
 
-        // ── Filtros de ruptura (vw_ruptura_avaliada) ─────────────────────────
-        // Mesmos filtros de canal/segmentação do restante do dashboard —
-        // a página de Ruptura aplica os mesmos, então os números batem.
         const rupturaParams: unknown[] = [ano, mes];
         let rupturaWhere = 'WHERE ano = $1 AND mes_numero = $2';
         if (filtroVendedor) { rupturaParams.push(filtroVendedor); rupturaWhere += ` AND vendedor_id = $${rupturaParams.length}`; }
@@ -36,19 +38,14 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
         let pedidosWhere = 'WHERE ano = $1 AND mes_numero = $2';
         if (filtroVendedor) { pedidosParams.push(filtroVendedor); pedidosWhere += ` AND vendedor_id = $${pedidosParams.length}`; }
 
-        // ── KPI de Clientes Ativos ───────────────────────────────────────────
-        // Quando o período tem roster (tabela ruptura), usa vw_ruptura_avaliada:
-        // já vem com a Regra Froneri (só clientes ativos no mês) e sem o ADM —
-        // idêntico ao que a página de Ruptura contabiliza. Sem roster para o
-        // período, cai no estado atual (clientes).
         const usarHistoricoClientes = await hasRupturaForPeriodo(mes, ano);
         const clientesKPIQuery = usarHistoricoClientes
             ? `
                 SELECT
-                    COUNT(*)                    AS total_ativos,
-                    SUM(ra.eh_com_compra)       AS com_compra,
-                    SUM(ra.eh_cliente_novo)     AS novos,
-                    SUM(ra.eh_mais_6_meses)     AS criticos,
+                    COUNT(*)                AS total_ativos,
+                    SUM(ra.eh_com_compra)   AS com_compra,
+                    SUM(ra.eh_cliente_novo) AS novos,
+                    SUM(ra.eh_mais_6_meses) AS criticos,
                     SUM(CASE WHEN c.tem_contrato = TRUE THEN 1 ELSE 0 END) AS com_contrato
                 FROM vw_ruptura_avaliada ra
                 LEFT JOIN clientes c ON c.customer_number = ra.customer_number
@@ -61,7 +58,7 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
                     COUNT(CASE WHEN nova_rup = 'C/ Compra'    THEN 1 END) AS com_compra,
                     COUNT(CASE WHEN nova_rup = 'Cliente Novo' THEN 1 END) AS novos,
                     COUNT(CASE WHEN nova_rup LIKE '%6 Meses%' THEN 1 END) AS criticos,
-                    COUNT(CASE WHEN tem_contrato = TRUE        THEN 1 END) AS com_contrato
+                    COUNT(CASE WHEN tem_contrato = TRUE       THEN 1 END) AS com_contrato
                 FROM clientes
                 WHERE status = 'C'
                 ${filtroVendedor ? 'AND vendedor_id = $1' : ''}
@@ -70,9 +67,9 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
             ? (filtroVendedor ? [mes, ano, filtroVendedor] : [mes, ano])
             : (filtroVendedor ? [filtroVendedor] : []);
 
-        // Todas as queries são independentes — dispara em paralelo
         const [
             vendasKPI,
+            devolucoesKPI,
             rupturaKPI,
             clientesKPI,
             pedidosKPI,
@@ -82,33 +79,41 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
             vendasVendedorRes,
             rupturaVendedorRes,
         ] = await Promise.all([
-            // Faturamento/volume — vw_vendas_validas (só status_venda='VENDA')
+            // BRUTO — só VENDA.
             query(`
                 SELECT
-                    COUNT(DISTINCT CASE WHEN status_venda = 'VENDA'
-                                        THEN customer_number END) AS clientes_atendidos,
-                    SUM(valor_nf)      AS valor_total_nf,
-                    SUM(valor_vbc)     AS valor_total_vbc,
-                    SUM(soma_caixas)   AS total_caixas,
-                    SUM(soma_litros)   AS total_litros,
-                    SUM(CASE WHEN status_venda = 'DEVOLUCAO'
-                             THEN -valor_nf ELSE 0 END)    AS valor_devolucoes,
-                    SUM(CASE WHEN status_venda = 'DEVOLUCAO'
-                             THEN -soma_caixas ELSE 0 END) AS caixas_devolucoes
+                    COUNT(DISTINCT customer_number) AS clientes_atendidos,
+                    COALESCE(SUM(valor_nf), 0)      AS valor_bruto_nf,
+                    COALESCE(SUM(valor_vbc), 0)     AS valor_bruto_vbc,
+                    COALESCE(SUM(soma_caixas), 0)   AS caixas_brutas,
+                    COALESCE(SUM(soma_litros), 0)   AS litros_brutos,
+                    COUNT(*)                        AS transacoes
                 FROM vw_vendas_validas
                 ${vendaWhere}
             `, p),
 
-            // Ruptura — KPI completo pela regra canônica, pct SEM arredondar
+            // DEVOLUÇÕES — mesmo WHERE, view irmã. Magnitude positiva.
             query(`
                 SELECT
-                    SUM(eh_ruptura)                                     AS total_ruptura,
-                    SUM(entra_base)                                     AS base_avaliada,
-                    SUM(eh_com_compra)                                  AS com_compra,
-                    SUM(eh_cliente_novo)                                AS clientes_novos,
-                    SUM(eh_sem_kv)                                      AS sem_kv,
-                    SUM(eh_mais_6_meses)                                AS mais_6_meses,
-                    100 * SUM(eh_ruptura) / NULLIF(SUM(entra_base), 0)  AS pct_ruptura
+                    COALESCE(SUM(valor_nf), 0)    AS valor_devolucoes,
+                    COALESCE(SUM(valor_vbc), 0)   AS vbc_devolucoes,
+                    COALESCE(SUM(soma_caixas), 0) AS caixas_devolucoes,
+                    COALESCE(SUM(soma_litros), 0) AS litros_devolucoes,
+                    COUNT(*)                      AS qtd_devolucoes,
+                    COUNT(DISTINCT customer_number) AS clientes_com_devolucao
+                FROM vw_vendas_devolucao
+                ${vendaWhere}
+            `, p),
+
+            query(`
+                SELECT
+                    SUM(eh_ruptura)                                    AS total_ruptura,
+                    SUM(entra_base)                                    AS base_avaliada,
+                    SUM(eh_com_compra)                                 AS com_compra,
+                    SUM(eh_cliente_novo)                               AS clientes_novos,
+                    SUM(eh_sem_kv)                                     AS sem_kv,
+                    SUM(eh_mais_6_meses)                               AS mais_6_meses,
+                    100 * SUM(eh_ruptura) / NULLIF(SUM(entra_base), 0) AS pct_ruptura
                 FROM vw_ruptura_avaliada
                 ${rupturaWhere}
             `, rupturaParams),
@@ -124,25 +129,35 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
                 ${pedidosWhere}
             `, pedidosParams),
 
+            // Categoria — vw_vendas_liquidas já traz devolução negativa,
+            // então SUM() é líquido direto. Sem UNION manual.
             query(`
-                SELECT categoria, SUM(valor_nf) AS valor, SUM(soma_caixas) AS caixas
-                FROM vw_vendas_validas
+                SELECT
+                    categoria,
+                    COALESCE(SUM(valor_nf), 0)    AS valor,
+                    COALESCE(SUM(soma_caixas), 0) AS caixas,
+                    COALESCE(SUM(CASE WHEN origem_linha = 'VENDA'
+                                      THEN valor_nf ELSE 0 END), 0) AS valor_bruto,
+                    COALESCE(SUM(CASE WHEN origem_linha = 'DEVOLUCAO'
+                                      THEN ABS(valor_nf) ELSE 0 END), 0) AS valor_devolucoes
+                FROM vw_vendas_liquidas
                 ${vendaWhere}
                 GROUP BY categoria
-                HAVING valor <> 0 OR caixas <> 0
+                HAVING SUM(valor_nf) <> 0 OR SUM(soma_caixas) <> 0
                 ORDER BY valor DESC
             `, p),
 
             query(`
-                SELECT canal_cliente AS name, SUM(valor_nf) AS value
-                FROM vw_vendas_validas
+                SELECT
+                    canal_cliente              AS name,
+                    COALESCE(SUM(valor_nf), 0) AS value
+                FROM vw_vendas_liquidas
                 ${vendaWhere}
                 GROUP BY canal_cliente
-                HAVING value <> 0
+                HAVING SUM(valor_nf) <> 0
                 ORDER BY value DESC
             `, p),
 
-            // Devedores: INNER JOIN condicional para filtro por vendedor
             query(`
                 SELECT
                     COUNT(DISTINCT d.documento_cliente) AS total_devedores,
@@ -154,28 +169,27 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
                     : ''}
             `, filtroVendedor ? [filtroVendedor] : []),
 
-            // Vendas por Vendedor — somente admin/gerente
+            // Por vendedor — a view mensal já entrega os três números.
             !filtroVendedor
                 ? query(`
                     SELECT
-                        v.nome AS vendedor_nome,
+                        v.nome  AS vendedor_nome,
                         v.setor,
-                        COALESCE(SUM(ve.valor_nf), 0) AS valor_nf,
-                        COUNT(DISTINCT CASE WHEN ve.status_venda = 'VENDA'
-                                            THEN ve.customer_number END) AS clientes
+                        COALESCE(SUM(kp.valor_liquido), 0)      AS valor_nf,
+                        COALESCE(SUM(kp.valor_bruto), 0)        AS valor_bruto,
+                        COALESCE(SUM(kp.valor_devolucoes), 0)   AS valor_devolucoes,
+                        COALESCE(SUM(kp.clientes_atendidos), 0) AS clientes
                     FROM vendedores v
-                    LEFT JOIN vw_vendas_validas ve ON ve.vendedor_id = v.id
-                        AND ve.mes_numero = $1 AND ve.ano = $2
+                    LEFT JOIN vw_vendas_kpi_mensal kp
+                           ON kp.vendedor_id = v.id
+                          AND kp.mes_numero  = $1
+                          AND kp.ano         = $2
                     WHERE v.ativo = TRUE
                     GROUP BY v.id, v.nome, v.setor
                     ORDER BY valor_nf DESC
                 `, [mes, ano])
                 : Promise.resolve({ rows: [] }),
 
-            // NOVO: Ruptura por Vendedor — somente admin/gerente.
-            // Substitui o recálculo local do dashboardPage (fase 3): mesma
-            // fórmula para todos, pct sem arredondar, base > 0 evita 0%/100%
-            // espúrios de vendedor sem base avaliada.
             !filtroVendedor
                 ? query(`
                     SELECT
@@ -194,9 +208,56 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
                 : Promise.resolve({ rows: [] }),
         ]);
 
+        // ── LÍQUIDO = BRUTO − DEVOLUÇÕES ────────────────────────────────
+        const vb = vendasKPI.rows[0] ?? {};
+        const dv = devolucoesKPI.rows[0] ?? {};
+
+        const n = (x: unknown) => Number(x ?? 0);
+
+        const valorBrutoNf  = n(vb.valor_bruto_nf);
+        const valorBrutoVbc = n(vb.valor_bruto_vbc);
+        const caixasBrutas  = n(vb.caixas_brutas);
+        const litrosBrutos  = n(vb.litros_brutos);
+        const clientes      = n(vb.clientes_atendidos);
+
+        const valorDevolucoes  = n(dv.valor_devolucoes);
+        const vbcDevolucoes    = n(dv.vbc_devolucoes);
+        const caixasDevolucoes = n(dv.caixas_devolucoes);
+        const litrosDevolucoes = n(dv.litros_devolucoes);
+
+        const valorLiquido = valorBrutoNf - valorDevolucoes;
+
         res.json({
-            periodo:            { mes, ano },
-            vendas:             vendasKPI.rows[0],
+            periodo: { mes, ano },
+            vendas: {
+                clientes_atendidos: clientes,
+                transacoes: n(vb.transacoes),
+
+                // Líquidos — o que os cards devem exibir.
+                valor_total_nf:  valorLiquido,
+                valor_total_vbc: valorBrutoVbc - vbcDevolucoes,
+                total_caixas:    caixasBrutas  - caixasDevolucoes,
+                total_litros:    litrosBrutos  - litrosDevolucoes,
+
+                // Brutos — para o front mostrar a composição do número.
+                valor_bruto_nf:  valorBrutoNf,
+                valor_bruto_vbc: valorBrutoVbc,
+                caixas_brutas:   caixasBrutas,
+                litros_brutos:   litrosBrutos,
+
+                // Devoluções — sempre POSITIVAS (magnitude abatida).
+                valor_devolucoes:      valorDevolucoes,
+                vbc_devolucoes:        vbcDevolucoes,
+                caixas_devolucoes:     caixasDevolucoes,
+                litros_devolucoes:     litrosDevolucoes,
+                qtd_devolucoes:        n(dv.qtd_devolucoes),
+                clientes_com_devolucao: n(dv.clientes_com_devolucao),
+                pct_devolucao: valorBrutoNf > 0
+                    ? (valorDevolucoes / valorBrutoNf) * 100
+                    : 0,
+
+                ticket_medio: clientes > 0 ? valorLiquido / clientes : 0,
+            },
             ruptura:            rupturaKPI.rows[0],
             clientes:           { ...clientesKPI.rows[0], _fonte: usarHistoricoClientes ? 'historico' : 'atual' },
             pedidos:            pedidosKPI.rows[0],
@@ -218,12 +279,11 @@ router.get('/tendencia', authMiddleware, ownDataOnly, async (req, res) => {
         const meses = Math.min(Number(req.query.meses || '6'), 12);
         const filtroVendedor = req.filtroVendedor;
 
-        // Ponto de corte com aritmética de datas:
-        // ex: junho/2026 - 6 meses = janeiro/2026 → anoCorte=2026, mesCorte=1
         const now = new Date();
         const refDate = new Date(now.getFullYear(), now.getMonth() - meses + 1, 1);
         const mesCorte = refDate.getMonth() + 1;
         const anoCorte = refDate.getFullYear();
+
         const p: unknown[] = [anoCorte, anoCorte, mesCorte];
         let extraWhere = '';
         if (filtroVendedor) {
@@ -231,20 +291,24 @@ router.get('/tendencia', authMiddleware, ownDataOnly, async (req, res) => {
             extraWhere = `AND vendedor_id = $${p.length}`;
         }
 
-        // vw_vendas_validas: antes a tendência somava devoluções/amostras.
+        // vw_vendas_liquidas: devolução negativa → SUM() já é líquido.
         const rows = await query(`
             SELECT
                 mes_numero,
                 ano,
-                mes_descricao,
-               SUM(valor_nf)    AS valor_nf,
-                SUM(soma_litros) AS litros,
-                COUNT(DISTINCT CASE WHEN status_venda = 'VENDA'
+                MAX(mes_descricao)         AS mes_descricao,
+                COALESCE(SUM(valor_nf), 0) AS valor_nf,
+                COALESCE(SUM(CASE WHEN origem_linha = 'VENDA'
+                                  THEN valor_nf ELSE 0 END), 0) AS valor_bruto,
+                COALESCE(SUM(CASE WHEN origem_linha = 'DEVOLUCAO'
+                                  THEN ABS(valor_nf) ELSE 0 END), 0) AS valor_devolucoes,
+                COALESCE(SUM(soma_litros), 0) AS litros,
+                COUNT(DISTINCT CASE WHEN origem_linha = 'VENDA'
                                     THEN customer_number END) AS clientes
-            FROM vw_vendas_validas
+            FROM vw_vendas_liquidas
             WHERE (ano > $1 OR (ano = $2 AND mes_numero >= $3))
             ${extraWhere}
-            GROUP BY mes_numero, ano, mes_descricao
+            GROUP BY mes_numero, ano
             ORDER BY ano, mes_numero
         `, p);
 
