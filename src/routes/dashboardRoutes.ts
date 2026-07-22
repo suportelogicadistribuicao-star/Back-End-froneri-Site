@@ -1,20 +1,4 @@
-// dashboardRoutes.ts — v3 (views canônicas)
-//
-// MUDANÇAS DA FASE 2:
-//   • Faturamento/volume: TODAS as somas agora saem de vw_vendas_validas
-//     (status_venda = 'VENDA' garantido pela view). Antes o KPI, a tendência
-//     e os gráficos por categoria/canal/vendedor somavam devoluções e
-//     amostras grátis junto.
-//   • Ruptura: sai de vw_ruptura_avaliada, que já aplica a regra canônica
-//     (snapshot mensal da Regra Froneri + exclusão do ADM_Logica MG).
-//     Antes usava o status ATUAL de clientes e não excluía o ADM.
-//   • O backend devolve o KPI COMPLETO de ruptura:
-//     { total_ruptura, base_avaliada, com_compra, pct_ruptura } — pct SEM
-//     arredondar; a exibição decide as casas decimais.
-//   • NOVO: rupturaPorVendedor (visão agregada, admin/gerente) — o front
-//     não precisa mais recalcular a regra localmente (fase 3).
-//   • Filtros canal/segmentação agora também se aplicam à ruptura, igual
-//     ao comportamento da página de Ruptura.
+
 import { Router } from 'express';
 import { query } from '../config/database';
 import { authMiddleware, ownDataOnly } from '../middleware/auth';
@@ -101,11 +85,16 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
             // Faturamento/volume — vw_vendas_validas (só status_venda='VENDA')
             query(`
                 SELECT
-                    COUNT(DISTINCT customer_number)    AS clientes_atendidos,
-                    SUM(valor_nf)                      AS valor_total_nf,
-                    SUM(valor_vbc)                     AS valor_total_vbc,
-                    SUM(soma_caixas)                   AS total_caixas,
-                    SUM(soma_litros)                   AS total_litros
+                    COUNT(DISTINCT CASE WHEN status_venda = 'VENDA'
+                                        THEN customer_number END) AS clientes_atendidos,
+                    SUM(valor_nf)      AS valor_total_nf,
+                    SUM(valor_vbc)     AS valor_total_vbc,
+                    SUM(soma_caixas)   AS total_caixas,
+                    SUM(soma_litros)   AS total_litros,
+                    SUM(CASE WHEN status_venda = 'DEVOLUCAO'
+                             THEN -valor_nf ELSE 0 END)    AS valor_devolucoes,
+                    SUM(CASE WHEN status_venda = 'DEVOLUCAO'
+                             THEN -soma_caixas ELSE 0 END) AS caixas_devolucoes
                 FROM vw_vendas_validas
                 ${vendaWhere}
             `, p),
@@ -140,6 +129,7 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
                 FROM vw_vendas_validas
                 ${vendaWhere}
                 GROUP BY categoria
+                HAVING valor <> 0 OR caixas <> 0
                 ORDER BY valor DESC
             `, p),
 
@@ -148,6 +138,7 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
                 FROM vw_vendas_validas
                 ${vendaWhere}
                 GROUP BY canal_cliente
+                HAVING value <> 0
                 ORDER BY value DESC
             `, p),
 
@@ -170,7 +161,8 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
                         v.nome AS vendedor_nome,
                         v.setor,
                         COALESCE(SUM(ve.valor_nf), 0) AS valor_nf,
-                        COUNT(DISTINCT ve.customer_number) AS clientes
+                        COUNT(DISTINCT CASE WHEN ve.status_venda = 'VENDA'
+                                            THEN ve.customer_number END) AS clientes
                     FROM vendedores v
                     LEFT JOIN vw_vendas_validas ve ON ve.vendedor_id = v.id
                         AND ve.mes_numero = $1 AND ve.ano = $2
@@ -245,9 +237,10 @@ router.get('/tendencia', authMiddleware, ownDataOnly, async (req, res) => {
                 mes_numero,
                 ano,
                 mes_descricao,
-                SUM(valor_nf)                   AS valor_nf,
-                SUM(soma_litros)                AS litros,
-                COUNT(DISTINCT customer_number) AS clientes
+               SUM(valor_nf)    AS valor_nf,
+                SUM(soma_litros) AS litros,
+                COUNT(DISTINCT CASE WHEN status_venda = 'VENDA'
+                                    THEN customer_number END) AS clientes
             FROM vw_vendas_validas
             WHERE (ano > $1 OR (ano = $2 AND mes_numero >= $3))
             ${extraWhere}

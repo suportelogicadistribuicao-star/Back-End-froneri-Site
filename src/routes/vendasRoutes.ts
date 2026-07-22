@@ -96,8 +96,13 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
           COALESCE(SUM(ve.valor_nf), 0)      AS faturamento,
           COALESCE(SUM(ve.soma_caixas), 0)   AS caixas,
           COALESCE(SUM(ve.soma_litros), 0)   AS litros,
-          COUNT(DISTINCT ve.customer_number) AS clientes,
-          COUNT(*)                           AS transacoes
+          COUNT(DISTINCT CASE WHEN ve.status_venda = 'VENDA'
+                                   THEN ve.customer_number END) AS clientes,
+          SUM(CASE WHEN ve.status_venda = 'VENDA' THEN 1 ELSE 0 END) AS transacoes,
+          COALESCE(SUM(CASE WHEN ve.status_venda = 'DEVOLUCAO'
+                            THEN -ve.valor_nf ELSE 0 END), 0) AS devolucoes_valor,
+          COALESCE(SUM(CASE WHEN ve.status_venda = 'DEVOLUCAO'
+                            THEN -ve.soma_caixas ELSE 0 END), 0) AS devolucoes_caixas
         FROM vw_vendas_validas ve
         LEFT JOIN vendedores v ON v.id = ve.vendedor_id
         ${baseWhere}
@@ -109,7 +114,8 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
                COALESCE(SUM(ve.valor_nf), 0)      AS valor_nf,
                COALESCE(SUM(ve.soma_caixas), 0)   AS caixas,
                COALESCE(SUM(ve.soma_litros), 0)   AS litros,
-               COUNT(DISTINCT ve.customer_number) AS clientes
+               COUNT(DISTINCT CASE WHEN ve.status_venda = 'VENDA'
+                                   THEN ve.customer_number END) AS clientes
         FROM vw_vendas_validas ve
         LEFT JOIN vendedores v ON v.id = ve.vendedor_id
         ${baseWhere}
@@ -121,7 +127,8 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
                COALESCE(SUM(ve.valor_nf), 0),
                COALESCE(SUM(ve.soma_caixas), 0),
                COALESCE(SUM(ve.soma_litros), 0),
-               COUNT(DISTINCT ve.customer_number)
+               COUNT(DISTINCT CASE WHEN ve.status_venda = 'VENDA'
+                                   THEN ve.customer_number END)
         FROM vw_vendas_validas ve
         LEFT JOIN vendedores v ON v.id = ve.vendedor_id
         ${baseWhere}
@@ -134,12 +141,14 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
       // ── Ranking de clientes ──────────────────────────────────────────────
       query(`
         SELECT ve.customer_number            AS sold,
-               MAX(ve.customer_name)         AS nome,
+               MAX(CASE WHEN ve.status_venda = 'VENDA'
+                        THEN ve.customer_name END) AS nome,
                COALESCE(SUM(ve.valor_nf), 0) AS valor
         FROM vw_vendas_validas ve
         LEFT JOIN vendedores v ON v.id = ve.vendedor_id
         ${baseWhere}
         GROUP BY ve.customer_number
+        HAVING valor <> 0
         ORDER BY valor DESC
       `, baseParams),
 
@@ -260,11 +269,13 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
 
     res.json({
       periodo: { mes, ano, canal, agrupar },
-      kpis: {
+     kpis: {
         faturamento, caixas,
         litros: Number(k.litros ?? 0),
         clientes,
         transacoes: Number(k.transacoes ?? 0),
+        devolucoes_valor:  Number(k.devolucoes_valor ?? 0),
+        devolucoes_caixas: Number(k.devolucoes_caixas ?? 0),
         ticket_medio: clientes > 0 ? faturamento / clientes : 0,
         caixas_por_cliente: clientes > 0 ? caixas / clientes : 0,
       },
@@ -333,7 +344,7 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
         SELECT
           ve.customer_number, ve.customer_name, ve.numero_nf, ve.data_faturamento,
           ve.descricao_produto, ve.categoria, ve.subcategoria, ve.categoria_total_sku,
-          ve.soma_caixas, ve.soma_litros, ve.valor_nf,
+          ve.soma_caixas, ve.soma_litros, ve.valor_nf, ve.status_venda,
           ve.canal_cliente, ve.segmentacao_cliente, ve.city,
           v.nome AS vendedor_nome
         FROM vw_vendas_validas ve
