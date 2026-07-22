@@ -101,6 +101,15 @@ function parseNumberLike(v: unknown): number | null {
 const normNum = (v: unknown): number | null => parseNumberLike(v);
 const normNumZero = (v: unknown): number => parseNumberLike(v) ?? 0;
 
+// [v4] A tabela `vendas` tem CHECK chk_vendas_valor_positivo: valor_nf,
+// valor_vbc, soma_caixas, soma_litros e soma_pallets precisam ser >= 0.
+// A convenção de sinal é responsabilidade das VIEWS (vw_vendas_liquidas
+// aplica o negativo em DEVOLUCAO), não do import. O .xlsb da Froneri traz
+// devolução com valor negativo, então normalizamos a magnitude aqui —
+// sem isso o chunk inteiro é rejeitado pelo MySQL e todas as vendas do
+// lote se perdem junto com as devoluções.
+const normNumAbs = (v: unknown): number => Math.abs(parseNumberLike(v) ?? 0);
+
 const normDate = (v: unknown): string | null => {
     if (!v) return null;
     // xlsx com cellDates:true + raw:true entrega Date objects para colunas de data.
@@ -497,6 +506,13 @@ async function processarRelatorioVendas(filePath: string, _usuarioId: string, lo
 
             // Deduplica produtos em toda a base antes dos chunks — evita o mesmo produto
             // ser UPSERTado repetidamente em cada chunk que o contenha.
+            //
+            // IMPORTANTE: varremos Base Vendas E Base Ordens Carteira. A carteira
+            // contém SKUs que ainda não foram faturados no período (é justamente
+            // o que "pedido em aberto" significa), então esses cod_item não
+            // existem na Base Vendas. Popular `produtos` só a partir de vendas
+            // fazia a FK fk_pedidos_produto estourar e derrubar o chunk inteiro
+            // de pedidos.
             const produtosMap = new Map<string, unknown[]>();
             for (const row of vendasRows) {
                 const codItem = norm(row['COD_ITEM']);
@@ -508,6 +524,21 @@ async function processarRelatorioVendas(filePath: string, _usuarioId: string, lo
                         norm(row['SUBCATEGORIA']),
                         norm(row['Segmento SKU']),
                         norm(row['Categoria TOTAL SKU']),
+                    ]);
+                }
+            }
+            // Carteira entra depois: se o SKU já veio de vendas, a versão de
+            // vendas prevalece (tem descrição/segmento mais completos).
+            for (const row of pedidosRows) {
+                const codItem = norm(col(row, '2nd Item Number', 'COD_ITEM'));
+                if (codItem && !produtosMap.has(codItem)) {
+                    produtosMap.set(codItem, [
+                        codItem,
+                        norm(col(row, 'Ordem_Delivery.Description', 'Descrição Produto')) || codItem,
+                        norm(row['CATEGORIA']),
+                        norm(row['SUBCATEGORIA']),
+                        norm(col(row, 'Segmento', 'Segmento SKU')),
+                        norm(col(row, 'Categoria TOTAL', 'Categoria TOTAL SKU')),
                     ]);
                 }
             }
@@ -526,7 +557,7 @@ async function processarRelatorioVendas(filePath: string, _usuarioId: string, lo
                         console.error(`[import/produtos] Erro no chunk ${i}:`, e.message);
                     }
                 }
-                console.log(`[import/vendas] ${produtosMap.size} produto(s) único(s) processado(s)`);
+                console.log(`[import/vendas] ${produtosMap.size} produto(s) único(s) processado(s) (vendas + carteira)`);
             }
 
             for (let i = 0; i < vendasRows.length; i += IMPORT_CHUNK_SIZE) {
@@ -616,11 +647,12 @@ async function processarRelatorioVendas(filePath: string, _usuarioId: string, lo
                         norm(row['SUBCATEGORIA']),
                         norm(row['Segmento SKU']),
                         norm(row['Categoria TOTAL SKU']),
-                        normNumZero(col(row, 'SomaDeCaixas', 'Soma Caixas', 'Caixas')),
-                        normNumZero(col(row, 'SomaDePallets', 'Soma Pallets', 'Pallets')),
-                        normNumZero(col(row, 'SomaDeLitros', 'Soma Litros', 'Litros')),
-                        normNumZero(col(row, 'SomaDeValor NF', 'Valor NF', 'ValorNF')),
-                        normNumZero(col(row, 'SomaDeValor VBC', 'Valor VBC', 'ValorVBC')),
+                        // [v4] ABS obrigatório — ver normNumAbs e chk_vendas_valor_positivo.
+                        normNumAbs(col(row, 'SomaDeCaixas', 'Soma Caixas', 'Caixas')),
+                        normNumAbs(col(row, 'SomaDePallets', 'Soma Pallets', 'Pallets')),
+                        normNumAbs(col(row, 'SomaDeLitros', 'Soma Litros', 'Litros')),
+                        normNumAbs(col(row, 'SomaDeValor NF', 'Valor NF', 'ValorNF')),
+                        normNumAbs(col(row, 'SomaDeValor VBC', 'Valor VBC', 'ValorVBC')),
                         statusVenda,
                         canalCliente,
                         hierarquia,
@@ -707,9 +739,73 @@ async function processarRelatorioVendas(filePath: string, _usuarioId: string, lo
                 'importacao_id=VALUES(importacao_id)',
             ].join(',');
 
+            // Se a Base Vendas veio vazia, o bloco 1b não rodou e os produtos da
+            // carteira nunca foram gravados. Garante o upsert aqui também —
+            // é idempotente, então não há custo quando 1b já rodou.
+            if (vendasRows.length === 0) {
+                const prodCarteira = new Map<string, unknown[]>();
+                for (const row of pedidosRows) {
+                    const codItem = norm(col(row, '2nd Item Number', 'COD_ITEM'));
+                    if (codItem && !prodCarteira.has(codItem)) {
+                        prodCarteira.set(codItem, [
+                            codItem,
+                            norm(col(row, 'Ordem_Delivery.Description', 'Descrição Produto')) || codItem,
+                            norm(row['CATEGORIA']),
+                            norm(row['SUBCATEGORIA']),
+                            norm(col(row, 'Segmento', 'Segmento SKU')),
+                            norm(col(row, 'Categoria TOTAL', 'Categoria TOTAL SKU')),
+                        ]);
+                    }
+                }
+                if (prodCarteira.size > 0) {
+                    const arr = [...prodCarteira.values()];
+                    const COLS_P = ['cod_item', 'descricao', 'categoria', 'subcategoria', 'segmento_sku', 'categoria_total_sku'];
+                    const DUP_P =
+                        'descricao=VALUES(descricao),' +
+                        'categoria=COALESCE(VALUES(categoria),categoria),' +
+                        'subcategoria=COALESCE(VALUES(subcategoria),subcategoria),' +
+                        'segmento_sku=COALESCE(VALUES(segmento_sku),segmento_sku),' +
+                        'categoria_total_sku=COALESCE(VALUES(categoria_total_sku),categoria_total_sku),' +
+                        'updated_at=NOW()';
+                    for (let i = 0; i < arr.length; i += IMPORT_CHUNK_SIZE) {
+                        const c = arr.slice(i, i + IMPORT_CHUNK_SIZE);
+                        try {
+                            await query(bulkSql('produtos', COLS_P, c.length, DUP_P), c.flat());
+                        } catch (e: any) {
+                            errosLog.push(`Produtos (carteira) chunk ${i}: ${e.message}`);
+                            console.error(`[import/produtos] Erro no chunk ${i}:`, e.message);
+                        }
+                    }
+                    console.log(`[import/pedidos] ${prodCarteira.size} produto(s) da carteira processado(s)`);
+                }
+            }
+
+            // ── Rede de segurança para as FKs de pedidos_carteira ─────────────
+            // As FKs são ON DELETE SET NULL, mas isso não permite INSERT com
+            // valor órfão — o MySQL rejeita a linha (e, em bulk insert, o chunk
+            // inteiro). Carregamos as chaves que realmente existem e trocamos
+            // por NULL qualquer referência que não bata, preservando a linha do
+            // pedido em vez de perder as 348 de uma vez.
+            const produtosExistentes = new Set<string>();
+            const clientesExistentes = new Set<number>();
+            try {
+                const [prodRes, cliRes] = await Promise.all([
+                    query('SELECT cod_item FROM produtos'),
+                    query('SELECT customer_number FROM clientes'),
+                ]);
+                for (const r of prodRes.rows) produtosExistentes.add(String(r.cod_item));
+                for (const r of cliRes.rows)  clientesExistentes.add(Number(r.customer_number));
+            } catch (e: any) {
+                console.error('[import/pedidos] Falha ao carregar chaves para validação de FK:', e.message);
+            }
+
+            let pedidosSemProduto = 0;
+            let pedidosSemCliente = 0;
+
             for (let i = 0; i < pedidosRows.length; i += IMPORT_CHUNK_SIZE) {
                 const chunk = pedidosRows.slice(i, i + IMPORT_CHUNK_SIZE);
                 const params: unknown[] = [];
+                let rowCount = 0;
 
                 for (const row of chunk) {
                     const orderDate = normDate(row['Order Date']);
@@ -727,15 +823,36 @@ async function processarRelatorioVendas(filePath: string, _usuarioId: string, lo
                     const ano = orderDate
                         ? parseInt(orderDate.substring(0, 4), 10)
                         : new Date().getUTCFullYear();
+
+                    // uk_pedidos_order_item = (order_number, cod_item). Sem os
+                    // dois o UPSERT não tem chave e a linha vira lixo duplicado.
+                    const orderNumber = normNum(row['OrderNumber']);
+                    const codItemRaw  = norm(col(row, '2nd Item Number', 'COD_ITEM'));
+                    if (!orderNumber || !codItemRaw) continue;
+
+                    // Só referencia o produto se ele existir de fato em `produtos`.
+                    let codItem: string | null = codItemRaw;
+                    if (!produtosExistentes.has(codItemRaw)) {
+                        codItem = null;
+                        pedidosSemProduto++;
+                    }
+
+                    const customerNumberRaw = normNum(col(row, 'Ship To Number', 'Customer Number'));
+                    let customerNumber: number | null = customerNumberRaw;
+                    if (customerNumberRaw !== null && !clientesExistentes.has(Number(customerNumberRaw))) {
+                        customerNumber = null;
+                        pedidosSemCliente++;
+                    }
+
                     params.push(
-                        normNum(col(row, 'Ship To Number', 'Customer Number')),
+                        customerNumber,
                         norm(col(row, 'Alpha Name', 'Customer Name')),
-                        normNum(row['OrderNumber']),
+                        orderNumber,
                         orderDate,
                         vendedorId,
                         norm(row['Vendedor.Description']),
                         normNum(row['Description 2']),
-                        norm(col(row, '2nd Item Number', 'COD_ITEM')),
+                        codItem,
                         norm(col(row, 'Ordem_Delivery.Description', 'Descrição Produto')),
                         norm(row['CATEGORIA']),
                         norm(row['SUBCATEGORIA']),
@@ -754,17 +871,27 @@ async function processarRelatorioVendas(filePath: string, _usuarioId: string, lo
                         norm(row['Status']),
                         logId,
                     );
+                    rowCount++;
                 }
 
+                if (rowCount === 0) continue;
+
                 try {
-                    await query(bulkSql('pedidos_carteira', PEDIDO_COLS, chunk.length, PEDIDO_ON_DUP), params);
-                    contadores.pedidos += chunk.length;
-                    console.log(`[import/pedidos] chunk ${i}: ${chunk.length} registro(s) inserido(s)`);
+                    await query(bulkSql('pedidos_carteira', PEDIDO_COLS, rowCount, PEDIDO_ON_DUP), params);
+                    contadores.pedidos += rowCount;
+                    console.log(`[import/pedidos] chunk ${i}: ${rowCount} registro(s) inserido(s)`);
                 } catch (e: any) {
-                    contadores.erros += chunk.length;
+                    contadores.erros += rowCount;
                     errosLog.push(`Pedidos chunk ${i}: ${e.message}`);
                     console.error(`[import/pedidos] Erro no chunk ${i}:`, e.message);
                 }
+            }
+
+            if (pedidosSemProduto > 0) {
+                console.warn(`[import/pedidos] ${pedidosSemProduto} linha(s) com cod_item fora de \`produtos\` — gravadas com cod_item=NULL`);
+            }
+            if (pedidosSemCliente > 0) {
+                console.warn(`[import/pedidos] ${pedidosSemCliente} linha(s) com customer_number fora de \`clientes\` — gravadas com customer_number=NULL`);
             }
         }
 
