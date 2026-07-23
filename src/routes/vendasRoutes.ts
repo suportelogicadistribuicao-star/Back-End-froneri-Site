@@ -1,4 +1,4 @@
-// vendasRoutes.ts — MySQL 8.0 — v4 (views separadas VENDA × DEVOLUCAO)
+// vendasRoutes.ts — MySQL 8.0 — v5 (dashboard aceita segmentacao)
 //
 // CONTRATO DE SINAL (schema v4):
 //   vw_vendas_validas   → só VENDA,     magnitude POSITIVA
@@ -7,6 +7,12 @@
 //
 // KPI: liquido = validas − devolucao, subtração EXPLÍCITA no back.
 // Agregações por grupo usam vw_vendas_liquidas (sem UNION manual).
+//
+// [v5] /dashboard agora lê `segmentacao` (segmentacao_cliente) e aplica em
+//   TODAS as consultas de VENDAS (KPIs, devoluções, resumo, clientes, evolução
+//   de faturamento e Take Home × Impulso). Assim o front pode fazer as séries
+//   de 6 meses reagirem à segmentação. A RUPTURA (vw_ruptura_avaliada) NÃO é
+//   filtrada por segmentação por padrão — ver nota na query de evolução.
 import { Router } from 'express';
 import { query } from '../config/database';
 import { authMiddleware, ownDataOnly } from '../middleware/auth';
@@ -32,7 +38,7 @@ function lastMonths(mes: number, ano: number, count: number) {
 const num = (x: unknown) => Number(x ?? 0);
 
 // ─────────────────────────────────────────────────────────────────────────────
-// GET /vendas/dashboard?mes=7&ano=2026&canal=OOH&agrupar=categoria&busca=x
+// GET /vendas/dashboard?mes=7&ano=2026&canal=OOH&segmentacao=A&agrupar=categoria&busca=x
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
   try {
@@ -42,23 +48,26 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
       return res.status(400).json({ erro: 'Parâmetros mes/ano inválidos.' });
     }
 
-    const canal    = req.query.canal ? String(req.query.canal) : null;
-    const buscaRaw = req.query.busca ? String(req.query.busca).trim() : '';
-    const busca    = buscaRaw ? buscaRaw.replace(/[\\%_]/g, '\\$&') : null;
-    const agrupar  = String(req.query.agrupar ?? 'categoria') === 'vendedor' ? 'vendedor' : 'categoria';
-    const topN     = Math.min(Math.max(Number(req.query.top_n) || 10, 1), 50);
-    const fvId     = req.filtroVendedor ?? null;
+    const canal       = req.query.canal ? String(req.query.canal) : null;
+    const segmentacao = req.query.segmentacao ? String(req.query.segmentacao) : null;
+    const buscaRaw    = req.query.busca ? String(req.query.busca).trim() : '';
+    const busca       = buscaRaw ? buscaRaw.replace(/[\\%_]/g, '\\$&') : null;
+    const agrupar     = String(req.query.agrupar ?? 'categoria') === 'vendedor' ? 'vendedor' : 'categoria';
+    const topN        = Math.min(Math.max(Number(req.query.top_n) || 10, 1), 50);
+    const fvId        = req.filtroVendedor ?? null;
 
     const grupoExpr = agrupar === 'vendedor'
       ? `TRIM(REPLACE(COALESCE(v.nome, 'Sem vendedor'), '_Logica MG', ''))`
       : `COALESCE(NULLIF(TRIM(ve.categoria), ''), 'Sem categoria')`;
 
     // Um WHERE só: as três views compartilham o mesmo contrato de colunas.
+    // [v5] +segmentacao_cliente (existe em vw_vendas_*; ver rota GET / abaixo).
     const baseWhere = `
       WHERE ve.mes_numero = ?
         AND ve.ano        = ?
-        AND (? IS NULL OR ve.vendedor_id   = ?)
-        AND (? IS NULL OR ve.canal_cliente = ?)
+        AND (? IS NULL OR ve.vendedor_id         = ?)
+        AND (? IS NULL OR ve.canal_cliente       = ?)
+        AND (? IS NULL OR ve.segmentacao_cliente = ?)
         AND (? IS NULL OR (
               ve.customer_name                 LIKE CONCAT('%', ?, '%')
            OR CAST(ve.customer_number AS CHAR) LIKE CONCAT('%', ?, '%')
@@ -66,15 +75,17 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
            OR ve.descricao_produto             LIKE CONCAT('%', ?, '%')
         ))
     `;
-    const baseParams = [mes, ano, fvId, fvId, canal, canal, busca, busca, busca, busca, busca];
+    const baseParams = [mes, ano, fvId, fvId, canal, canal, segmentacao, segmentacao, busca, busca, busca, busca, busca];
 
     const months = lastMonths(mes, ano, EVOLUTION_MONTHS);
     const periodoIn = months.map(() => '(?, ?)').join(', ');
     const periodoParams = months.flatMap(m => [m.mes, m.ano]);
 
+    // [v5] +segmentacao_cliente nas séries multi-mês (faturamento + tipos).
     const filtroPeriodo = `
-        AND (? IS NULL OR ve.vendedor_id   = ?)
-        AND (? IS NULL OR ve.canal_cliente = ?)
+        AND (? IS NULL OR ve.vendedor_id         = ?)
+        AND (? IS NULL OR ve.canal_cliente       = ?)
+        AND (? IS NULL OR ve.segmentacao_cliente = ?)
         AND (? IS NULL OR (
               ve.customer_name                 LIKE CONCAT('%', ?, '%')
            OR CAST(ve.customer_number AS CHAR) LIKE CONCAT('%', ?, '%')
@@ -82,7 +93,7 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
            OR ve.descricao_produto             LIKE CONCAT('%', ?, '%')
         ))
     `;
-    const filtroPeriodoParams = [fvId, fvId, canal, canal, busca, busca, busca, busca, busca];
+    const filtroPeriodoParams = [fvId, fvId, canal, canal, segmentacao, segmentacao, busca, busca, busca, busca, busca];
 
     const [kpisQ, devQ, resumoQ, clientesQ, evolucaoQ, tiposMensalQ] = await Promise.all([
       // ── BRUTO — só VENDA ────────────────────────────────────────────────
@@ -196,6 +207,13 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
           WHERE (ra.mes_numero, ra.ano) IN (${periodoIn})
             AND (? IS NULL OR ra.vendedor_id   = ?)
             AND (? IS NULL OR ra.canal_cliente = ?)
+           -- [v5] Segmentação NÃO é aplicada à ruptura por padrão: depende de
+            -- vw_ruptura_avaliada expor 'segmentacao_cliente'. Se essa coluna
+            -- EXISTIR na view, descomente as DUAS linhas abaixo E adicione
+            -- 'segmentacao, segmentacao' ANTES de 'busca, busca, busca' no
+            -- bloco de params da ruptura (marcado mais abaixo) para a linha de
+            -- ruptura % também reagir à segmentação:
+            -- AND (? IS NULL OR ra.segmentacao_cliente = ?)
             AND (? IS NULL OR (
                   ra.customer_name                 LIKE CONCAT('%', ?, '%')
                OR CAST(ra.customer_number AS CHAR) LIKE CONCAT('%', ?, '%')
@@ -207,6 +225,9 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
       `, [
         ...periodoParams, ...periodoParams,
         ...periodoParams, ...filtroPeriodoParams,
+        // ── Params da ruptura ──
+        // Se ativar o filtro de segmentação na ruptura (acima), insira
+        // `segmentacao, segmentacao,` logo após `canal, canal,` nesta linha:
         ...periodoParams, fvId, fvId, canal, canal, busca, busca, busca, busca,
       ]),
 
@@ -285,7 +306,7 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
     });
 
     res.json({
-      periodo: { mes, ano, canal, agrupar },
+      periodo: { mes, ano, canal, segmentacao, agrupar },
       kpis: {
         // Líquidos — devolução já abatida.
         faturamento, caixas, litros, clientes,

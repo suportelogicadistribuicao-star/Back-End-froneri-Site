@@ -802,6 +802,20 @@ async function processarRelatorioVendas(filePath: string, _usuarioId: string, lo
             let pedidosSemProduto = 0;
             let pedidosSemCliente = 0;
 
+            // A carteira é uma FOTOGRAFIA do momento da extração, não um
+            // histórico acumulável: quando a indústria fatura um pedido, ele
+            // simplesmente SOME da planilha na próxima exportação. Um
+            // UPSERT por (order_number, cod_item) nunca removeria essas linhas
+            // faturadas, deixando pedidos-fantasma vivos no banco e inflando a
+            // carteira. Como cada planilha traz a carteira COMPLETA e vigente,
+            // a estratégia correta é substituir o conjunto inteiro: apagar tudo
+            // e reinserir. Para nunca deixar a tabela vazia num estado
+            // intermediário, o DELETE e todos os INSERTs rodam na MESMA
+            // transação — se qualquer chunk falhar, o ROLLBACK devolve a
+            // carteira anterior intacta. Por isso montamos os chunks aqui e só
+            // gravamos depois, de uma vez, dentro de withTransaction.
+            const pedidoChunks: unknown[][] = [];
+
             for (let i = 0; i < pedidosRows.length; i += IMPORT_CHUNK_SIZE) {
                 const chunk = pedidosRows.slice(i, i + IMPORT_CHUNK_SIZE);
                 const params: unknown[] = [];
@@ -876,15 +890,38 @@ async function processarRelatorioVendas(filePath: string, _usuarioId: string, lo
 
                 if (rowCount === 0) continue;
 
-                try {
-                    await query(bulkSql('pedidos_carteira', PEDIDO_COLS, rowCount, PEDIDO_ON_DUP), params);
-                    contadores.pedidos += rowCount;
-                    console.log(`[import/pedidos] chunk ${i}: ${rowCount} registro(s) inserido(s)`);
-                } catch (e: any) {
-                    contadores.erros += rowCount;
-                    errosLog.push(`Pedidos chunk ${i}: ${e.message}`);
-                    console.error(`[import/pedidos] Erro no chunk ${i}:`, e.message);
-                }
+                // Não grava aqui: acumula. Só o parâmetro `rowCount` (agora
+                // implícito em params.length / nº de colunas) importa para o
+                // bulkSql lá embaixo — mantemos o chunk como está para gravar
+                // tudo dentro da transação única.
+                pedidoChunks.push(params);
+            }
+
+            // ── Substituição atômica da carteira ──────────────────────────────
+            // DELETE total + reinsert de todos os chunks numa transação só.
+            // A planilha é sempre a carteira completa e vigente, então o estado
+            // anterior é integralmente substituído. Se qualquer INSERT falhar,
+            // o rollback preserva a carteira antiga (nunca fica vazia).
+            const numCols = PEDIDO_COLS.length;
+            try {
+                await withTransaction(async (client) => {
+                    await client.query('DELETE FROM pedidos_carteira');
+                    for (const params of pedidoChunks) {
+                        const rowCount = params.length / numCols;
+                        await client.query(
+                            bulkSql('pedidos_carteira', PEDIDO_COLS, rowCount, PEDIDO_ON_DUP),
+                            params,
+                        );
+                        contadores.pedidos += rowCount;
+                    }
+                });
+                console.log(`[import/pedidos] carteira substituída: ${contadores.pedidos} registro(s) inserido(s)`);
+            } catch (e: any) {
+                // Rollback já devolveu a carteira anterior — nada foi perdido.
+                contadores.erros += contadores.pedidos;
+                contadores.pedidos = 0;
+                errosLog.push(`Pedidos (substituição da carteira): ${e.message}`);
+                console.error('[import/pedidos] Erro na substituição da carteira (rollback aplicado):', e.message);
             }
 
             if (pedidosSemProduto > 0) {
