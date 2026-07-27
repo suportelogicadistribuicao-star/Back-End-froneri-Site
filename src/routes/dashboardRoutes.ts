@@ -319,4 +319,115 @@ router.get('/tendencia', authMiddleware, ownDataOnly, async (req, res) => {
     }
 });
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NOVO ENDPOINT — cole este bloco dentro de dashboardRoutes.ts,
+// logo ANTES da linha `export default router;`.
+//
+// GET /api/dashboard/comparativo-anual?ano=2026&canal=OOH&segmentacao=A
+//
+// Retorna os 12 meses do ano pedido lado a lado com o MESMO mês do ano anterior,
+// já com o percentual de crescimento/queda calculado no banco.
+//
+// Contrato de sinal (schema v4): vw_vendas_liquidas já traz a devolução como
+// valor NEGATIVO, então SUM(valor_nf) é o líquido direto — sem UNION manual.
+//
+// Uma única query pega os DOIS anos (ano e ano-1) e o GROUP BY separa por ano.
+// Meses futuros / sem venda saem com 0 (o front preenche os 12 slots).
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/comparativo-anual', authMiddleware, ownDataOnly, async (req, res) => {
+    try {
+        const now = new Date();
+        const anoAtual = Number(req.query.ano) || now.getFullYear();
+        const anoAnterior = anoAtual - 1;
+        const canal = (req.query.canal as string) || null;
+        const segmentacao = (req.query.segmentacao as string) || null;
+        const filtroVendedor = req.filtroVendedor;
+
+        // $1 = anoAnterior, $2 = anoAtual — os dois anos que nos interessam.
+        const p: unknown[] = [anoAnterior, anoAtual];
+        let where = 'WHERE ano IN ($1, $2)';
+        if (filtroVendedor) { p.push(filtroVendedor); where += ` AND vendedor_id = $${p.length}`; }
+        if (canal)          { p.push(canal);          where += ` AND canal_cliente = $${p.length}`; }
+        if (segmentacao)    { p.push(segmentacao);    where += ` AND segmentacao_cliente = $${p.length}`; }
+
+        const rows = await query(`
+            SELECT
+                ano,
+                mes_numero,
+                COALESCE(SUM(valor_nf), 0) AS valor_liquido,
+                COALESCE(SUM(CASE WHEN origem_linha = 'VENDA'
+                                  THEN valor_nf ELSE 0 END), 0) AS valor_bruto,
+                COALESCE(SUM(CASE WHEN origem_linha = 'DEVOLUCAO'
+                                  THEN ABS(valor_nf) ELSE 0 END), 0) AS valor_devolucoes,
+                COALESCE(SUM(soma_caixas), 0) AS caixas,
+                COUNT(DISTINCT CASE WHEN origem_linha = 'VENDA'
+                                    THEN customer_number END) AS clientes
+            FROM vw_vendas_liquidas
+            ${where}
+            GROUP BY ano, mes_numero
+            ORDER BY ano, mes_numero
+        `, p);
+
+        // Indexa por "ano-mes" para casar cada mês do ano atual com o anterior.
+        const chave = (ano: number, mes: number) => `${ano}-${mes}`;
+        const mapa = new Map<string, Record<string, unknown>>();
+        for (const r of rows.rows as Record<string, unknown>[]) {
+            mapa.set(chave(Number(r.ano), Number(r.mes_numero)), r);
+        }
+
+        const n = (x: unknown) => Number(x ?? 0);
+
+        // Monta os 12 slots fixos (jan–dez), sempre com atual + anterior.
+        const meses = Array.from({ length: 12 }, (_, i) => {
+            const mesNumero = i + 1;
+            const atual = mapa.get(chave(anoAtual, mesNumero));
+            const anterior = mapa.get(chave(anoAnterior, mesNumero));
+
+            const valorAtual = n(atual?.valor_liquido);
+            const valorAnterior = n(anterior?.valor_liquido);
+
+            // Crescimento YoY. Sem base no ano anterior, o percentual não é
+            // definível: devolvemos null (o front mostra "—" em vez de forjar ∞).
+            const variacaoPct = valorAnterior !== 0
+                ? ((valorAtual - valorAnterior) / valorAnterior) * 100
+                : null;
+
+            return {
+                mes_numero: mesNumero,
+                valor_atual: valorAtual,
+                valor_anterior: valorAnterior,
+                bruto_atual: n(atual?.valor_bruto),
+                bruto_anterior: n(anterior?.valor_bruto),
+                devolucoes_atual: n(atual?.valor_devolucoes),
+                devolucoes_anterior: n(anterior?.valor_devolucoes),
+                caixas_atual: n(atual?.caixas),
+                caixas_anterior: n(anterior?.caixas),
+                clientes_atual: n(atual?.clientes),
+                clientes_anterior: n(anterior?.clientes),
+                variacao_pct: variacaoPct,
+            };
+        });
+
+        // Totais do ano (soma dos 12 meses) — útil para um resumo no topo do card.
+        const totalAtual = meses.reduce((s, m) => s + m.valor_atual, 0);
+        const totalAnterior = meses.reduce((s, m) => s + m.valor_anterior, 0);
+        const variacaoAnual = totalAnterior !== 0
+            ? ((totalAtual - totalAnterior) / totalAnterior) * 100
+            : null;
+
+        res.json({
+            ano_atual: anoAtual,
+            ano_anterior: anoAnterior,
+            total_atual: totalAtual,
+            total_anterior: totalAnterior,
+            variacao_anual_pct: variacaoAnual,
+            meses,
+        });
+    } catch (err) {
+        console.error('[dashboard/comparativo-anual]', err);
+        res.status(500).json({ erro: 'Erro ao carregar comparativo anual.' });
+    }
+});
+
 export default router;
