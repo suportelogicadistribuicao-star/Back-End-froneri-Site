@@ -453,4 +453,197 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
   }
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// GET /vendas/comparativo-anual?ano=2026&canal=OOH&segmentacao=A&busca=x
+//
+// Versão ANUAL da "Evolução Mensal — Faturamento vs Ruptura (%)": em vez dos 6
+// meses corridos de /dashboard, devolve os 12 slots fixos (jan–dez) do ano
+// pedido lado a lado com o MESMO mês do ano anterior — mesma ideia do
+// /dashboard/comparativo-anual, só que carregando também a ruptura % dos dois
+// anos.
+//
+// Duas queries independentes (vendas e ruptura) casadas em memória por
+// "ano-mes": um JOIN no SQL exigiria uma tabela de calendário, e o volume aqui
+// é de 24 linhas por lado.
+//
+// Contrato de sinal (schema v4): vw_vendas_liquidas traz devolução NEGATIVA,
+// então SUM(valor_nf) já é o líquido.
+//
+// Ruptura: `null` (não 0) quando a base avaliada do mês é zero — mês futuro ou
+// sem roster importado não tem ruptura "de 0%", tem ruptura indefinida. O front
+// usa connectNulls={false} para não desenhar o ponto.
+//
+// [v6] Diferente da evolução de 6 meses do /dashboard, aqui a segmentação É
+// aplicada à ruptura: vw_ruptura_avaliada expõe segmentacao_cliente (vem do
+// LEFT JOIN clientes), então as duas séries reagem ao mesmo filtro.
+// ─────────────────────────────────────────────────────────────────────────────
+router.get('/comparativo-anual', authMiddleware, ownDataOnly, async (req, res) => {
+  try {
+    const anoAtual = Number(req.query.ano) || new Date().getFullYear();
+    if (!Number.isFinite(anoAtual) || anoAtual < 1900 || anoAtual > 3000) {
+      return res.status(400).json({ erro: 'Parâmetro ano inválido.' });
+    }
+    const anoAnterior = anoAtual - 1;
+
+    const canal       = req.query.canal ? String(req.query.canal) : null;
+    const segmentacao = req.query.segmentacao ? String(req.query.segmentacao) : null;
+    const buscaRaw    = req.query.busca ? String(req.query.busca).trim() : '';
+    const busca       = buscaRaw ? buscaRaw.replace(/[\\%_]/g, '\\$&') : null;
+    const fvId        = req.filtroVendedor ?? null;
+
+    const [vendasQ, rupturaQ] = await Promise.all([
+      // ── Faturamento LÍQUIDO por (ano, mês) — os dois anos de uma vez ──────
+      query(`
+        SELECT ve.ano, ve.mes_numero,
+               COALESCE(SUM(ve.valor_nf), 0) AS valor,
+               COALESCE(SUM(CASE WHEN ve.origem_linha = 'VENDA'
+                                 THEN ve.valor_nf ELSE 0 END), 0) AS valor_bruto,
+               COALESCE(SUM(CASE WHEN ve.origem_linha = 'DEVOLUCAO'
+                                 THEN ABS(ve.valor_nf) ELSE 0 END), 0) AS valor_devolucoes,
+               COALESCE(SUM(ve.soma_caixas), 0) AS caixas,
+               COUNT(DISTINCT CASE WHEN ve.origem_linha = 'VENDA'
+                                   THEN ve.customer_number END) AS clientes
+        FROM vw_vendas_liquidas ve
+        LEFT JOIN vendedores v ON v.id = ve.vendedor_id
+        WHERE ve.ano IN (?, ?)
+          AND (? IS NULL OR ve.vendedor_id         = ?)
+          AND (? IS NULL OR ve.canal_cliente       = ?)
+          AND (? IS NULL OR ve.segmentacao_cliente = ?)
+          AND (? IS NULL OR (
+                ve.customer_name                 LIKE CONCAT('%', ?, '%')
+             OR CAST(ve.customer_number AS CHAR) LIKE CONCAT('%', ?, '%')
+             OR v.nome                           LIKE CONCAT('%', ?, '%')
+             OR ve.descricao_produto             LIKE CONCAT('%', ?, '%')
+          ))
+        GROUP BY ve.ano, ve.mes_numero
+      `, [
+        anoAnterior, anoAtual,
+        fvId, fvId, canal, canal, segmentacao, segmentacao,
+        busca, busca, busca, busca, busca,
+      ]),
+
+      // ── Ruptura por (ano, mês) — mesma fórmula de vw_ruptura_kpi_mensal ───
+      query(`
+        SELECT ra.ano, ra.mes_numero,
+               SUM(ra.eh_ruptura) AS rupturas,
+               SUM(ra.entra_base) AS base
+        FROM vw_ruptura_avaliada ra
+        WHERE ra.ano IN (?, ?)
+          AND (? IS NULL OR ra.vendedor_id         = ?)
+          AND (? IS NULL OR ra.canal_cliente       = ?)
+          AND (? IS NULL OR ra.segmentacao_cliente = ?)
+          AND (? IS NULL OR (
+                ra.customer_name                 LIKE CONCAT('%', ?, '%')
+             OR CAST(ra.customer_number AS CHAR) LIKE CONCAT('%', ?, '%')
+             OR ra.vendedor_nome                 LIKE CONCAT('%', ?, '%')
+          ))
+        GROUP BY ra.ano, ra.mes_numero
+      `, [
+        anoAnterior, anoAtual,
+        fvId, fvId, canal, canal, segmentacao, segmentacao,
+        busca, busca, busca, busca,
+      ]),
+    ]);
+
+    const chave = (ano: number, mes: number) => `${ano}-${mes}`;
+    const vendasMap  = new Map<string, any>(vendasQ.rows.map((r: any) => [chave(num(r.ano), num(r.mes_numero)), r]));
+    const rupturaMap = new Map<string, any>(rupturaQ.rows.map((r: any) => [chave(num(r.ano), num(r.mes_numero)), r]));
+
+    // Ruptura % do mês, ou null quando não há base avaliada.
+    const pctRuptura = (r: any): number | null => {
+      const base = num(r?.base);
+      if (base <= 0) return null;
+      return (num(r?.rupturas) / base) * 100;
+    };
+
+    const meses = Array.from({ length: 12 }, (_, i) => {
+      const mesNumero = i + 1;
+      const vAtual    = vendasMap.get(chave(anoAtual, mesNumero));
+      const vAnterior = vendasMap.get(chave(anoAnterior, mesNumero));
+      const rAtual    = rupturaMap.get(chave(anoAtual, mesNumero));
+      const rAnterior = rupturaMap.get(chave(anoAnterior, mesNumero));
+
+      const valorAtual    = num(vAtual?.valor);
+      const valorAnterior = num(vAnterior?.valor);
+
+      // Sem base no ano anterior o crescimento não é definível — null, não ∞.
+      const variacaoPct = valorAnterior !== 0
+        ? ((valorAtual - valorAnterior) / valorAnterior) * 100
+        : null;
+
+      const rupturaAtual    = pctRuptura(rAtual);
+      const rupturaAnterior = pctRuptura(rAnterior);
+
+      // Ruptura é um percentual: a diferença entre dois anos vai em PONTOS
+      // PERCENTUAIS, não em variação relativa.
+      const rupturaDeltaPp = rupturaAtual != null && rupturaAnterior != null
+        ? rupturaAtual - rupturaAnterior
+        : null;
+
+      return {
+        mes_numero: mesNumero,
+        label: MES_ABREV[i],
+
+        valor_atual: valorAtual,
+        valor_anterior: valorAnterior,
+        bruto_atual: num(vAtual?.valor_bruto),
+        bruto_anterior: num(vAnterior?.valor_bruto),
+        devolucoes_atual: num(vAtual?.valor_devolucoes),
+        devolucoes_anterior: num(vAnterior?.valor_devolucoes),
+        caixas_atual: num(vAtual?.caixas),
+        caixas_anterior: num(vAnterior?.caixas),
+        clientes_atual: num(vAtual?.clientes),
+        clientes_anterior: num(vAnterior?.clientes),
+        variacao_pct: variacaoPct,
+
+        ruptura_atual: rupturaAtual,
+        ruptura_anterior: rupturaAnterior,
+        ruptura_delta_pp: rupturaDeltaPp,
+        base_atual: num(rAtual?.base),
+        base_anterior: num(rAnterior?.base),
+        rupturas_atual: num(rAtual?.rupturas),
+        rupturas_anterior: num(rAnterior?.rupturas),
+      };
+    });
+
+    const totalAtual    = meses.reduce((s, m) => s + m.valor_atual, 0);
+    const totalAnterior = meses.reduce((s, m) => s + m.valor_anterior, 0);
+    const variacaoAnual = totalAnterior !== 0
+      ? ((totalAtual - totalAnterior) / totalAnterior) * 100
+      : null;
+
+    // Ruptura do ano = soma das rupturas ÷ soma das bases (média PONDERADA).
+    // Média simples dos 12 percentuais daria peso igual a um mês com 20
+    // clientes na base e a outro com 2.000.
+    const rupturaAno = (bases: number, rupturas: number): number | null =>
+      bases > 0 ? (rupturas / bases) * 100 : null;
+
+    const baseAtual        = meses.reduce((s, m) => s + m.base_atual, 0);
+    const baseAnterior     = meses.reduce((s, m) => s + m.base_anterior, 0);
+    const rupturasAtual    = meses.reduce((s, m) => s + m.rupturas_atual, 0);
+    const rupturasAnterior = meses.reduce((s, m) => s + m.rupturas_anterior, 0);
+
+    const rupturaMediaAtual    = rupturaAno(baseAtual, rupturasAtual);
+    const rupturaMediaAnterior = rupturaAno(baseAnterior, rupturasAnterior);
+
+    res.json({
+      ano_atual: anoAtual,
+      ano_anterior: anoAnterior,
+      filtros: { canal, segmentacao, busca: buscaRaw || null },
+      total_atual: totalAtual,
+      total_anterior: totalAnterior,
+      variacao_anual_pct: variacaoAnual,
+      ruptura_media_atual: rupturaMediaAtual,
+      ruptura_media_anterior: rupturaMediaAnterior,
+      ruptura_delta_pp: rupturaMediaAtual != null && rupturaMediaAnterior != null
+        ? rupturaMediaAtual - rupturaMediaAnterior
+        : null,
+      meses,
+    });
+  } catch (err) {
+    console.error('[vendas/comparativo-anual]', err);
+    res.status(500).json({ erro: 'Erro ao carregar comparativo anual de vendas.' });
+  }
+});
+
 export default router;
