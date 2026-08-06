@@ -8,19 +8,30 @@ const rupturaRouter = express.Router();
 rupturaRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
     try {
         const { mes, ano, vendedor_id, page = 1, limit = 50 } = req.query;
-        const fvId = req.filtroVendedor || vendedor_id;
+
+        // NaN aqui viraria token solto no SQL (`mes_numero = NaN` → erro 1054).
+        const mesNum = mes ? Number(mes) : null;
+        const anoNum = ano ? Number(ano) : null;
+        if ((mesNum !== null && !Number.isInteger(mesNum)) || (anoNum !== null && !Number.isInteger(anoNum))) {
+            return res.status(400).json({ erro: 'Parâmetros mes/ano inválidos.' });
+        }
+        const vendedorQuery = vendedor_id !== undefined && vendedor_id !== '' ? Number(vendedor_id) : null;
+        if (vendedorQuery !== null && !Number.isFinite(vendedorQuery)) {
+            return res.status(400).json({ erro: 'Parâmetro vendedor_id inválido.' });
+        }
+        const fvId = req.filtroVendedor ?? vendedorQuery;
 
         const where = [];
         const params: any[] = [];
         let p = 1;
 
-        if (mes) {
+        if (mesNum !== null) {
             where.push(`r.mes_numero = $${p++}`);
-            params.push(Number(mes));
+            params.push(mesNum);
         }
-        if (ano) {
+        if (anoNum !== null) {
             where.push(`r.ano = $${p++}`);
-            params.push(Number(ano));
+            params.push(anoNum);
         }
         if (fvId) {
             where.push(`r.vendedor_id = $${p++}`);
@@ -28,7 +39,9 @@ rupturaRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
         }
 
         const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
-        const offset = (Number(page) - 1) * Number(limit);
+        const pageNum  = Math.max(Number(page) || 1, 1);
+        const limitNum = Math.min(Math.max(Number(limit) || 50, 1), 2000);
+        const offset   = (pageNum - 1) * limitNum;
 
         const limitIdx = p;
         const offsetIdx = p + 1;
@@ -49,14 +62,14 @@ rupturaRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
                 ${whereSql}
                 ORDER BY c.segmentacao_cliente, c.customer_name
                 LIMIT $${limitIdx} OFFSET $${offsetIdx}
-            `, [...params, Number(limit), offset]),
+            `, [...params, limitNum, offset]),
             query(
                 `SELECT COUNT(*) AS count FROM ruptura r ${whereSql}`,
                 params
             ),
         ]);
 
-        res.json({ total: Number(total.rows[0].count), pagina: Number(page), dados: rows.rows });
+        res.json({ total: Number(total.rows[0].count), pagina: pageNum, dados: rows.rows });
     } catch (err) {
         res.status(500).json({ erro: 'Erro ao listar ruptura.' });
     }
@@ -102,7 +115,11 @@ rotRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
             limit = 500,
             ordenar_por_nome,
         } = req.query;
-        const fvId = req.filtroVendedor || vendedor_id;
+        const vendedorQuery = vendedor_id !== undefined && vendedor_id !== '' ? Number(vendedor_id) : null;
+        if (vendedorQuery !== null && !Number.isFinite(vendedorQuery)) {
+            return res.status(400).json({ erro: 'Parâmetro vendedor_id inválido.' });
+        }
+        const fvId = req.filtroVendedor ?? vendedorQuery;
         const params: any[] = [];
         const where = ['rot.ativa = TRUE'];
         let p = 1;
@@ -347,7 +364,11 @@ const cadRouter = express.Router();
 cadRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
     try {
         const { status, vendedor_id, page = 1, limit = 50 } = req.query;
-        const fvId = req.filtroVendedor || vendedor_id;
+        const vendedorQuery = vendedor_id !== undefined && vendedor_id !== '' ? Number(vendedor_id) : null;
+        if (vendedorQuery !== null && !Number.isFinite(vendedorQuery)) {
+            return res.status(400).json({ erro: 'Parâmetro vendedor_id inválido.' });
+        }
+        const fvId = req.filtroVendedor ?? vendedorQuery;
         const where = [];
         const params = [];
         let p = 1;
@@ -356,7 +377,9 @@ cadRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
         if (status){ where.push(`c.status = $${p++}`);      params.push(status); }
 
         const wStr = where.length ? 'WHERE ' + where.join(' AND ') : '';
-        const offset = (Number(page) - 1) * Number(limit);
+        const pageNum  = Math.max(Number(page) || 1, 1);
+        const limitNum = Math.min(Math.max(Number(limit) || 50, 1), 2000);
+        const offset   = (pageNum - 1) * limitNum;
 
         const rows = await query(`
             SELECT c.*, v.nome AS vendedor_nome
@@ -365,7 +388,7 @@ cadRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
             ${wStr}
             ORDER BY c.created_at DESC
             LIMIT $${p++} OFFSET $${p++}
-        `, [...params, Number(limit), offset]);
+        `, [...params, limitNum, offset]);
 
         res.json(rows.rows);
     } catch (err) {
@@ -379,7 +402,11 @@ const tickRouter = express.Router();
 tickRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
     try {
         const { status, vendedor_id } = req.query;
-        const fvId = req.filtroVendedor || vendedor_id;
+        const vendedorQuery = vendedor_id !== undefined && vendedor_id !== '' ? Number(vendedor_id) : null;
+        if (vendedorQuery !== null && !Number.isFinite(vendedorQuery)) {
+            return res.status(400).json({ erro: 'Parâmetro vendedor_id inválido.' });
+        }
+        const fvId = req.filtroVendedor ?? vendedorQuery;
         const where = [];
         const params = [];
         let p = 1;

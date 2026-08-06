@@ -51,6 +51,14 @@ router.post('/', authMiddleware, ownDataOnly, async (req, res) => {
             return res.status(400).json({ erro: 'customer_name é obrigatório.' });
         }
 
+        // clientes é chaveada pelo customer_number do ERP (sem AUTO_INCREMENT):
+        // sem ele o INSERT não tem chave e o insertId do driver seria 0.
+        const customerNumber = Number(payload.customer_number);
+        if (!Number.isInteger(customerNumber) || customerNumber <= 0) {
+            return res.status(400).json({ erro: 'customer_number é obrigatório e deve ser numérico.' });
+        }
+        payload.customer_number = customerNumber;
+
         if (!payload.status) payload.status = 'C';
         if (req.filtroVendedor) payload.vendedor_id = req.filtroVendedor;
 
@@ -58,14 +66,13 @@ router.post('/', authMiddleware, ownDataOnly, async (req, res) => {
         const values = Object.values(payload);
         const placeholders = fields.map((_, i) => `$${i + 1}`);
 
-        const createdInsert = await query(
+        await query(
             `INSERT INTO clientes (${fields.join(', ')})
              VALUES (${placeholders.join(', ')})`,
             values
         );
 
-        const createdId = payload.customer_number ?? createdInsert.insertId;
-        const created = await query('SELECT * FROM clientes WHERE customer_number = $1', [createdId]);
+        const created = await query('SELECT * FROM clientes WHERE customer_number = $1', [customerNumber]);
 
         res.status(201).json(created.rows[0]);
     } catch (err) {
@@ -90,7 +97,10 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
             mes, ano,
         } = req.query;
 
-        const offset = (Number(page) - 1) * Number(limit);
+        // page/limit vêm da query string — NaN aqui viraria `LIMIT NaN` no SQL.
+        const pageNum  = Math.max(Number(page) || 1, 1);
+        const limitNum = Math.min(Math.max(Number(limit) || 50, 1), 500);
+        const offset   = (pageNum - 1) * limitNum;
 
         const periodoInformado = mes !== undefined && mes !== '' && ano !== undefined && ano !== '';
         const mesNum = periodoInformado ? Number(mes) : null;
@@ -116,24 +126,34 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
             params.push(status);
         }
 
-        // Filtro automático por vendedor para role vendedor
-        const fvId = req.filtroVendedor || vendedor_id;
+        // Filtro automático por vendedor para role vendedor. vendedor_id da
+        // query precisa ser escalar numérico — ?vendedor_id=1&vendedor_id=2
+        // chega como array e viraria SQL inválido.
+        const vendedorQuery = vendedor_id !== undefined && vendedor_id !== '' ? Number(vendedor_id) : null;
+        if (vendedorQuery !== null && !Number.isFinite(vendedorQuery)) {
+            return res.status(400).json({ erro: 'Parâmetro vendedor_id inválido.' });
+        }
+        const fvId = req.filtroVendedor ?? vendedorQuery;
         if (fvId) { where.push(`c.vendedor_id = $${p++}`); params.push(fvId); }
 
         if (busca) {
-            const buscaParam = `%${busca}%`;
+            // Cada ocorrência precisa de placeholder e param próprios: o shim
+            // do database.ts converte $N em `?` posicional, então reutilizar o
+            // mesmo $N desalinha todos os binds seguintes. %/_ do usuário são
+            // escapados para valerem como literais no LIKE.
+            const buscaParam = `%${String(busca).replace(/[\\%_]/g, '\\$&')}%`;
             where.push(`(
-                unaccent(c.customer_name) ILIKE unaccent($${p}) OR
-                c.cnpj ILIKE $${p} OR
-                c.city ILIKE $${p} OR
-                c.customer_number::text ILIKE $${p++}
+                c.customer_name LIKE $${p++} OR
+                c.cnpj LIKE $${p++} OR
+                c.city LIKE $${p++} OR
+                CAST(c.customer_number AS CHAR) LIKE $${p++}
             )`);
-            params.push(buscaParam);
+            params.push(buscaParam, buscaParam, buscaParam, buscaParam);
         }
         if (canal)       { where.push(`c.canal_cliente = $${p++}`);       params.push(canal);       }
         if (segmentacao) { where.push(`c.segmentacao_cliente = $${p++}`); params.push(segmentacao); }
         if (nova_rup)    { where.push(`c.nova_rup = $${p++}`);            params.push(nova_rup);    }
-        if (cidade)      { where.push(`c.city ILIKE $${p++}`);            params.push(`%${cidade}%`); }
+        if (cidade)      { where.push(`c.city LIKE $${p++}`);             params.push(`%${String(cidade).replace(/[\\%_]/g, '\\$&')}%`); }
 
         if (com_ruptura === 'true') {
             const now = new Date();
@@ -180,13 +200,13 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
                 ${whereClause}
                 ORDER BY c.customer_name
                 LIMIT $${limitIdx} OFFSET $${offsetIdx}
-            `, [...params, Number(limit), offset]),
+            `, [...params, limitNum, offset]),
         ]);
 
         res.json({
             total:   Number(total.rows[0].count),
-            pagina:  Number(page),
-            limite:  Number(limit),
+            pagina:  pageNum,
+            limite:  limitNum,
             dados:   rows.rows,
             ...(periodoInformado ? { periodo: { mes: mesNum, ano: anoNum, fonte: usarHistorico ? 'historico' : 'atual' } } : {}),
         });
@@ -244,6 +264,7 @@ router.get('/exportar/csv', authMiddleware, ownDataOnly, async (req, res) => {
 router.get('/:id', authMiddleware, ownDataOnly, async (req, res) => {
     try {
         const id = Number(req.params.id);
+        if (!Number.isFinite(id)) return res.status(400).json({ erro: 'ID inválido.' });
 
         const [cliente, vendas, ruptura, pedidos, historicoCadastral] = await Promise.all([
             query(`

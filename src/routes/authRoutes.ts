@@ -142,15 +142,19 @@ router.post('/register', async (req, res) => {
 
         const senhaHash = await bcrypt.hash(String(senha), 12);
 
-        const criadoInsert = await query(
-            `INSERT INTO usuarios (nome, email, senha_hash, role, ativo)
-             VALUES ($1, $2, $3, $4, TRUE)`,
-            [nomeNormalizado, emailNormalizado, senhaHash, roleFinal]
+        // usuarios.id é CHAR(36) gerado pela aplicação (como em /register-vendedor).
+        // insertId do driver não serve aqui: sem AUTO_INCREMENT ele é 0, e
+        // `WHERE id = 0` numa coluna texto casa com QUALQUER uuid por coerção.
+        const usuarioId = randomUUID();
+        await query(
+            `INSERT INTO usuarios (id, nome, email, senha_hash, role, ativo)
+             VALUES ($1, $2, $3, $4, $5, TRUE)`,
+            [usuarioId, nomeNormalizado, emailNormalizado, senhaHash, roleFinal]
         );
 
         const criado = await query(
             'SELECT id, nome, email, role, ativo FROM usuarios WHERE id = $1',
-            [criadoInsert.insertId]
+            [usuarioId]
         );
 
         return res.status(201).json({

@@ -32,12 +32,16 @@ function requireRole(...roles) {
     };
 }
 
-// Vendedor só vê os próprios dados (a menos que seja admin/gerente)
+// Vendedor só vê os próprios dados (a menos que seja admin/gerente).
+// Falha FECHADO: usuário sem vendedor vinculado não tem escopo de dados —
+// seguir sem filtro exporia a base inteira da empresa a qualquer token
+// cujo vendedor_id seja null/0.
 function ownDataOnly(req, res, next) {
     if (['admin', 'gerente'].includes(req.usuario?.role)) return next();
-    if (req.usuario?.vendedor_id) {
-        req.filtroVendedor = req.usuario.vendedor_id;
+    if (!req.usuario?.vendedor_id) {
+        return res.status(403).json({ erro: 'Usuário sem vendedor vinculado. Contate o administrador.' });
     }
+    req.filtroVendedor = req.usuario.vendedor_id;
     next();
 }
 

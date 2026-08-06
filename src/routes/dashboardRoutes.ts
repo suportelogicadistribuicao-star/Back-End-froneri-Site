@@ -276,7 +276,8 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
 // GET /api/dashboard/tendencia?meses=6&ano=2026
 router.get('/tendencia', authMiddleware, ownDataOnly, async (req, res) => {
     try {
-        const meses = Math.min(Number(req.query.meses || '6'), 12);
+        // NaN aqui contaminaria o Date e viraria `ano > NaN` no SQL (erro 1054).
+        const meses = Math.min(Math.max(Math.trunc(Number(req.query.meses) || 6), 1), 12);
         const filtroVendedor = req.filtroVendedor;
 
         const now = new Date();
@@ -338,7 +339,14 @@ router.get('/tendencia', authMiddleware, ownDataOnly, async (req, res) => {
 router.get('/comparativo-anual', authMiddleware, ownDataOnly, async (req, res) => {
     try {
         const now = new Date();
-        const anoAtual = Number(req.query.ano) || now.getFullYear();
+        // Fallback só quando o parâmetro está AUSENTE — `Number(x) || fallback`
+        // engoliria ano=abc em silêncio e ano=2026.5 devolveria 12 meses zerados.
+        const anoAtual = req.query.ano === undefined || req.query.ano === ''
+            ? now.getFullYear()
+            : Number(req.query.ano);
+        if (!Number.isInteger(anoAtual) || anoAtual < 1900 || anoAtual > 3000) {
+            return res.status(400).json({ erro: 'Parâmetro ano inválido.' });
+        }
         const anoAnterior = anoAtual - 1;
         const canal = (req.query.canal as string) || null;
         const segmentacao = (req.query.segmentacao as string) || null;
@@ -387,9 +395,10 @@ router.get('/comparativo-anual', authMiddleware, ownDataOnly, async (req, res) =
             const valorAtual = n(atual?.valor_liquido);
             const valorAnterior = n(anterior?.valor_liquido);
 
-            // Crescimento YoY. Sem base no ano anterior, o percentual não é
-            // definível: devolvemos null (o front mostra "—" em vez de forjar ∞).
-            const variacaoPct = valorAnterior !== 0
+            // Crescimento YoY. Sem base POSITIVA no ano anterior, o percentual
+            // não é definível: devolvemos null (o front mostra "—" em vez de
+            // forjar ∞); denominador negativo inverteria o sinal.
+            const variacaoPct = valorAnterior > 0
                 ? ((valorAtual - valorAnterior) / valorAnterior) * 100
                 : null;
 
@@ -409,10 +418,18 @@ router.get('/comparativo-anual', authMiddleware, ownDataOnly, async (req, res) =
             };
         });
 
-        // Totais do ano (soma dos 12 meses) — útil para um resumo no topo do card.
-        const totalAtual = meses.reduce((s, m) => s + m.valor_atual, 0);
-        const totalAnterior = meses.reduce((s, m) => s + m.valor_anterior, 0);
-        const variacaoAnual = totalAnterior !== 0
+        // Totais do ano numa janela COMPARÁVEL: até o último mês do ano pedido
+        // com dado. Somar os 12 slots compararia um ano parcial com o anterior
+        // completo — em agosto mostraria uma "queda" anual de ~40% que não existe.
+        const ultimoMesComDado = meses.reduce(
+            (ult, m) => (m.valor_atual !== 0 || m.bruto_atual !== 0) ? m.mes_numero : ult,
+            0
+        );
+        const janela = meses.slice(0, ultimoMesComDado);
+
+        const totalAtual = janela.reduce((s, m) => s + m.valor_atual, 0);
+        const totalAnterior = janela.reduce((s, m) => s + m.valor_anterior, 0);
+        const variacaoAnual = totalAnterior > 0
             ? ((totalAtual - totalAnterior) / totalAnterior) * 100
             : null;
 
@@ -422,6 +439,7 @@ router.get('/comparativo-anual', authMiddleware, ownDataOnly, async (req, res) =
             total_atual: totalAtual,
             total_anterior: totalAnterior,
             variacao_anual_pct: variacaoAnual,
+            meses_comparados: ultimoMesComDado,
             meses,
         });
     } catch (err) {

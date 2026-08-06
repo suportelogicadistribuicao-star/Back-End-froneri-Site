@@ -356,6 +356,9 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
   try {
     const mes         = req.query.mes ? Number(req.query.mes) : null;
     const ano         = req.query.ano ? Number(req.query.ano) : null;
+    if ((mes !== null && !Number.isInteger(mes)) || (ano !== null && !Number.isInteger(ano))) {
+      return res.status(400).json({ erro: 'Parâmetros mes/ano inválidos.' });
+    }
     const canal       = req.query.canal ? String(req.query.canal) : null;
     const segmentacao = req.query.segmentacao ? String(req.query.segmentacao) : null;
     const buscaRaw    = req.query.busca ? String(req.query.busca).trim() : '';
@@ -363,7 +366,15 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
     const isExport    = String(req.query.export ?? '') === 'true';
     const incluirDev  = String(req.query.incluir_devolucoes ?? 'true') !== 'false';
 
-    const fvId   = req.filtroVendedor ?? req.query.vendedor_id ?? null;
+    // vendedor_id da query precisa ser escalar numérico — repetir o parâmetro
+    // na URL chega como array e viraria SQL inválido.
+    const vendedorQuery = req.query.vendedor_id !== undefined && req.query.vendedor_id !== ''
+      ? Number(req.query.vendedor_id)
+      : null;
+    if (vendedorQuery !== null && !Number.isFinite(vendedorQuery)) {
+      return res.status(400).json({ erro: 'Parâmetro vendedor_id inválido.' });
+    }
+    const fvId   = req.filtroVendedor ?? vendedorQuery;
     const page   = Math.max(Number(req.query.page) || 1, 1);
     const limit  = isExport ? 50000 : Math.min(Math.max(Number(req.query.limit) || 30, 1), 500);
     const offset = isExport ? 0 : (page - 1) * limit;
@@ -479,8 +490,13 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/comparativo-anual', authMiddleware, ownDataOnly, async (req, res) => {
   try {
-    const anoAtual = Number(req.query.ano) || new Date().getFullYear();
-    if (!Number.isFinite(anoAtual) || anoAtual < 1900 || anoAtual > 3000) {
+    // Fallback para o ano corrente só quando o parâmetro está AUSENTE —
+    // `Number(x) || fallback` engoliria ano=abc e ano=0 em silêncio, e sem o
+    // isInteger um ano=2026.5 passaria e devolveria 12 meses zerados com 200.
+    const anoAtual = req.query.ano === undefined || req.query.ano === ''
+      ? new Date().getFullYear()
+      : Number(req.query.ano);
+    if (!Number.isInteger(anoAtual) || anoAtual < 1900 || anoAtual > 3000) {
       return res.status(400).json({ erro: 'Parâmetro ano inválido.' });
     }
     const anoAnterior = anoAtual - 1;
@@ -489,7 +505,16 @@ router.get('/comparativo-anual', authMiddleware, ownDataOnly, async (req, res) =
     const segmentacao = req.query.segmentacao ? String(req.query.segmentacao) : null;
     const buscaRaw    = req.query.busca ? String(req.query.busca).trim() : '';
     const busca       = buscaRaw ? buscaRaw.replace(/[\\%_]/g, '\\$&') : null;
-    const fvId        = req.filtroVendedor ?? null;
+
+    // Mesmo fallback do GET / — sem ele o admin filtra a tabela por vendedor e
+    // este gráfico ignora o filtro na mesma tela.
+    const vendedorQuery = req.query.vendedor_id !== undefined && req.query.vendedor_id !== ''
+      ? Number(req.query.vendedor_id)
+      : null;
+    if (vendedorQuery !== null && !Number.isFinite(vendedorQuery)) {
+      return res.status(400).json({ erro: 'Parâmetro vendedor_id inválido.' });
+    }
+    const fvId        = req.filtroVendedor ?? vendedorQuery;
 
     const [vendasQ, rupturaQ] = await Promise.all([
       // ── Faturamento LÍQUIDO por (ano, mês) — os dois anos de uma vez ──────
@@ -504,22 +529,22 @@ router.get('/comparativo-anual', authMiddleware, ownDataOnly, async (req, res) =
                COUNT(DISTINCT CASE WHEN ve.origem_linha = 'VENDA'
                                    THEN ve.customer_number END) AS clientes
         FROM vw_vendas_liquidas ve
-        LEFT JOIN vendedores v ON v.id = ve.vendedor_id
+        ${busca ? `LEFT JOIN vendedores v ON v.id = ve.vendedor_id` : ''}
         WHERE ve.ano IN (?, ?)
           AND (? IS NULL OR ve.vendedor_id         = ?)
           AND (? IS NULL OR ve.canal_cliente       = ?)
           AND (? IS NULL OR ve.segmentacao_cliente = ?)
-          AND (? IS NULL OR (
+          ${busca ? `AND (
                 ve.customer_name                 LIKE CONCAT('%', ?, '%')
              OR CAST(ve.customer_number AS CHAR) LIKE CONCAT('%', ?, '%')
              OR v.nome                           LIKE CONCAT('%', ?, '%')
              OR ve.descricao_produto             LIKE CONCAT('%', ?, '%')
-          ))
+          )` : ''}
         GROUP BY ve.ano, ve.mes_numero
       `, [
         anoAnterior, anoAtual,
         fvId, fvId, canal, canal, segmentacao, segmentacao,
-        busca, busca, busca, busca, busca,
+        ...(busca ? [busca, busca, busca, busca] : []),
       ]),
 
       // ── Ruptura por (ano, mês) — mesma fórmula de vw_ruptura_kpi_mensal ───
@@ -532,16 +557,16 @@ router.get('/comparativo-anual', authMiddleware, ownDataOnly, async (req, res) =
           AND (? IS NULL OR ra.vendedor_id         = ?)
           AND (? IS NULL OR ra.canal_cliente       = ?)
           AND (? IS NULL OR ra.segmentacao_cliente = ?)
-          AND (? IS NULL OR (
+          ${busca ? `AND (
                 ra.customer_name                 LIKE CONCAT('%', ?, '%')
              OR CAST(ra.customer_number AS CHAR) LIKE CONCAT('%', ?, '%')
              OR ra.vendedor_nome                 LIKE CONCAT('%', ?, '%')
-          ))
+          )` : ''}
         GROUP BY ra.ano, ra.mes_numero
       `, [
         anoAnterior, anoAtual,
         fvId, fvId, canal, canal, segmentacao, segmentacao,
-        busca, busca, busca, busca,
+        ...(busca ? [busca, busca, busca] : []),
       ]),
     ]);
 
@@ -566,8 +591,10 @@ router.get('/comparativo-anual', authMiddleware, ownDataOnly, async (req, res) =
       const valorAtual    = num(vAtual?.valor);
       const valorAnterior = num(vAnterior?.valor);
 
-      // Sem base no ano anterior o crescimento não é definível — null, não ∞.
-      const variacaoPct = valorAnterior !== 0
+      // Sem base POSITIVA no ano anterior o crescimento não é definível — null,
+      // não ∞; denominador negativo (mês só com devoluções) inverteria o sinal
+      // e mostraria queda numa recuperação.
+      const variacaoPct = valorAnterior > 0
         ? ((valorAtual - valorAnterior) / valorAnterior) * 100
         : null;
 
@@ -606,9 +633,19 @@ router.get('/comparativo-anual', authMiddleware, ownDataOnly, async (req, res) =
       };
     });
 
-    const totalAtual    = meses.reduce((s, m) => s + m.valor_atual, 0);
-    const totalAnterior = meses.reduce((s, m) => s + m.valor_anterior, 0);
-    const variacaoAnual = totalAnterior !== 0
+    // Janela comparável: até o último mês do ano pedido que tem dado (venda ou
+    // base de ruptura). Somar os 12 slots compararia um ano PARCIAL com o
+    // anterior COMPLETO — em agosto isso mostraria uma "queda" anual de ~40%
+    // que não existe.
+    const ultimoMesComDado = meses.reduce(
+      (ult, m) => (m.valor_atual !== 0 || m.bruto_atual !== 0 || m.base_atual > 0) ? m.mes_numero : ult,
+      0
+    );
+    const janela = meses.slice(0, ultimoMesComDado);
+
+    const totalAtual    = janela.reduce((s, m) => s + m.valor_atual, 0);
+    const totalAnterior = janela.reduce((s, m) => s + m.valor_anterior, 0);
+    const variacaoAnual = totalAnterior > 0
       ? ((totalAtual - totalAnterior) / totalAnterior) * 100
       : null;
 
@@ -618,10 +655,10 @@ router.get('/comparativo-anual', authMiddleware, ownDataOnly, async (req, res) =
     const rupturaAno = (bases: number, rupturas: number): number | null =>
       bases > 0 ? (rupturas / bases) * 100 : null;
 
-    const baseAtual        = meses.reduce((s, m) => s + m.base_atual, 0);
-    const baseAnterior     = meses.reduce((s, m) => s + m.base_anterior, 0);
-    const rupturasAtual    = meses.reduce((s, m) => s + m.rupturas_atual, 0);
-    const rupturasAnterior = meses.reduce((s, m) => s + m.rupturas_anterior, 0);
+    const baseAtual        = janela.reduce((s, m) => s + m.base_atual, 0);
+    const baseAnterior     = janela.reduce((s, m) => s + m.base_anterior, 0);
+    const rupturasAtual    = janela.reduce((s, m) => s + m.rupturas_atual, 0);
+    const rupturasAnterior = janela.reduce((s, m) => s + m.rupturas_anterior, 0);
 
     const rupturaMediaAtual    = rupturaAno(baseAtual, rupturasAtual);
     const rupturaMediaAnterior = rupturaAno(baseAnterior, rupturasAnterior);
@@ -633,6 +670,7 @@ router.get('/comparativo-anual', authMiddleware, ownDataOnly, async (req, res) =
       total_atual: totalAtual,
       total_anterior: totalAnterior,
       variacao_anual_pct: variacaoAnual,
+      meses_comparados: ultimoMesComDado,
       ruptura_media_atual: rupturaMediaAtual,
       ruptura_media_anterior: rupturaMediaAnterior,
       ruptura_delta_pp: rupturaMediaAtual != null && rupturaMediaAnterior != null
