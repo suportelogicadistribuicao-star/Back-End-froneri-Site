@@ -27,7 +27,6 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 var otherRoutes_exports = {};
 __export(otherRoutes_exports, {
-  cadRouter: () => cadRouter,
   devRouter: () => devRouter,
   rotRouter: () => rotRouter,
   rupturaRouter: () => rupturaRouter,
@@ -41,24 +40,35 @@ const rupturaRouter = import_express.default.Router();
 rupturaRouter.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req, res) => {
   try {
     const { mes, ano, vendedor_id, page = 1, limit = 50 } = req.query;
-    const fvId = req.filtroVendedor || vendedor_id;
+    const mesNum = mes ? Number(mes) : null;
+    const anoNum = ano ? Number(ano) : null;
+    if (mesNum !== null && !Number.isInteger(mesNum) || anoNum !== null && !Number.isInteger(anoNum)) {
+      return res.status(400).json({ erro: "Par\xE2metros mes/ano inv\xE1lidos." });
+    }
+    const vendedorQuery = vendedor_id !== void 0 && vendedor_id !== "" ? Number(vendedor_id) : null;
+    if (vendedorQuery !== null && !Number.isFinite(vendedorQuery)) {
+      return res.status(400).json({ erro: "Par\xE2metro vendedor_id inv\xE1lido." });
+    }
+    const fvId = req.filtroVendedor ?? vendedorQuery;
     const where = [];
     const params = [];
     let p = 1;
-    if (mes) {
+    if (mesNum !== null) {
       where.push(`r.mes_numero = $${p++}`);
-      params.push(Number(mes));
+      params.push(mesNum);
     }
-    if (ano) {
+    if (anoNum !== null) {
       where.push(`r.ano = $${p++}`);
-      params.push(Number(ano));
+      params.push(anoNum);
     }
     if (fvId) {
       where.push(`r.vendedor_id = $${p++}`);
       params.push(fvId);
     }
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
-    const offset = (Number(page) - 1) * Number(limit);
+    const pageNum = Math.max(Number(page) || 1, 1);
+    const limitNum = Math.min(Math.max(Number(limit) || 50, 1), 2e3);
+    const offset = (pageNum - 1) * limitNum;
     const limitIdx = p;
     const offsetIdx = p + 1;
     const [rows, total] = await Promise.all([
@@ -77,13 +87,13 @@ rupturaRouter.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, asyn
                 ${whereSql}
                 ORDER BY c.segmentacao_cliente, c.customer_name
                 LIMIT $${limitIdx} OFFSET $${offsetIdx}
-            `, [...params, Number(limit), offset]),
+            `, [...params, limitNum, offset]),
       (0, import_database.query)(
         `SELECT COUNT(*) AS count FROM ruptura r ${whereSql}`,
         params
       )
     ]);
-    res.json({ total: Number(total.rows[0].count), pagina: Number(page), dados: rows.rows });
+    res.json({ total: Number(total.rows[0].count), pagina: pageNum, dados: rows.rows });
   } catch (err) {
     res.status(500).json({ erro: "Erro ao listar ruptura." });
   }
@@ -133,7 +143,11 @@ rotRouter.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (r
       limit = 500,
       ordenar_por_nome
     } = req.query;
-    const fvId = req.filtroVendedor || vendedor_id;
+    const vendedorQuery = vendedor_id !== void 0 && vendedor_id !== "" ? Number(vendedor_id) : null;
+    if (vendedorQuery !== null && !Number.isFinite(vendedorQuery)) {
+      return res.status(400).json({ erro: "Par\xE2metro vendedor_id inv\xE1lido." });
+    }
+    const fvId = req.filtroVendedor ?? vendedorQuery;
     const params = [];
     const where = ["rot.ativa = TRUE"];
     let p = 1;
@@ -332,42 +346,15 @@ rotRouter.delete("/:id", import_auth.authMiddleware, async (req, res) => {
     res.status(500).json({ erro: "Erro ao remover roteiriza\xE7\xE3o." });
   }
 });
-const cadRouter = import_express.default.Router();
-cadRouter.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req, res) => {
-  try {
-    const { status, vendedor_id, page = 1, limit = 50 } = req.query;
-    const fvId = req.filtroVendedor || vendedor_id;
-    const where = [];
-    const params = [];
-    let p = 1;
-    if (fvId) {
-      where.push(`c.vendedor_id = $${p++}`);
-      params.push(fvId);
-    }
-    if (status) {
-      where.push(`c.status = $${p++}`);
-      params.push(status);
-    }
-    const wStr = where.length ? "WHERE " + where.join(" AND ") : "";
-    const offset = (Number(page) - 1) * Number(limit);
-    const rows = await (0, import_database.query)(`
-            SELECT c.*, v.nome AS vendedor_nome
-            FROM cadastros c
-            LEFT JOIN vendedores v ON v.id = c.vendedor_id
-            ${wStr}
-            ORDER BY c.created_at DESC
-            LIMIT $${p++} OFFSET $${p++}
-        `, [...params, Number(limit), offset]);
-    res.json(rows.rows);
-  } catch (err) {
-    res.status(500).json({ erro: "Erro ao listar cadastros." });
-  }
-});
 const tickRouter = import_express.default.Router();
 tickRouter.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req, res) => {
   try {
     const { status, vendedor_id } = req.query;
-    const fvId = req.filtroVendedor || vendedor_id;
+    const vendedorQuery = vendedor_id !== void 0 && vendedor_id !== "" ? Number(vendedor_id) : null;
+    if (vendedorQuery !== null && !Number.isFinite(vendedorQuery)) {
+      return res.status(400).json({ erro: "Par\xE2metro vendedor_id inv\xE1lido." });
+    }
+    const fvId = req.filtroVendedor ?? vendedorQuery;
     const where = [];
     const params = [];
     let p = 1;
@@ -410,7 +397,6 @@ devRouter.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (r
 });
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
-  cadRouter,
   devRouter,
   rotRouter,
   rupturaRouter,

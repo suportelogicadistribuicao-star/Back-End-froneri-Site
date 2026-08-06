@@ -87,6 +87,7 @@ function parseNumberLike(v) {
 }
 const normNum = (v) => parseNumberLike(v);
 const normNumZero = (v) => parseNumberLike(v) ?? 0;
+const normNumAbs = (v) => Math.abs(parseNumberLike(v) ?? 0);
 const normDate = (v) => {
   if (!v) return null;
   if (v instanceof Date) return isNaN(v.getTime()) ? null : v.toISOString().split("T")[0];
@@ -435,6 +436,19 @@ async function processarRelatorioVendas(filePath, _usuarioId, logId, fileBuffer)
           ]);
         }
       }
+      for (const row of pedidosRows) {
+        const codItem = norm(col(row, "2nd Item Number", "COD_ITEM"));
+        if (codItem && !produtosMap.has(codItem)) {
+          produtosMap.set(codItem, [
+            codItem,
+            norm(col(row, "Ordem_Delivery.Description", "Descri\xE7\xE3o Produto")) || codItem,
+            norm(row["CATEGORIA"]),
+            norm(row["SUBCATEGORIA"]),
+            norm(col(row, "Segmento", "Segmento SKU")),
+            norm(col(row, "Categoria TOTAL", "Categoria TOTAL SKU"))
+          ]);
+        }
+      }
       if (produtosMap.size > 0) {
         const produtosArr = [...produtosMap.values()];
         for (let i = 0; i < produtosArr.length; i += IMPORT_CHUNK_SIZE) {
@@ -449,7 +463,7 @@ async function processarRelatorioVendas(filePath, _usuarioId, logId, fileBuffer)
             console.error(`[import/produtos] Erro no chunk ${i}:`, e.message);
           }
         }
-        console.log(`[import/vendas] ${produtosMap.size} produto(s) \xFAnico(s) processado(s)`);
+        console.log(`[import/vendas] ${produtosMap.size} produto(s) \xFAnico(s) processado(s) (vendas + carteira)`);
       }
       for (let i = 0; i < vendasRows.length; i += IMPORT_CHUNK_SIZE) {
         const chunk = vendasRows.slice(i, i + IMPORT_CHUNK_SIZE);
@@ -537,11 +551,12 @@ async function processarRelatorioVendas(filePath, _usuarioId, logId, fileBuffer)
             norm(row["SUBCATEGORIA"]),
             norm(row["Segmento SKU"]),
             norm(row["Categoria TOTAL SKU"]),
-            normNumZero(col(row, "SomaDeCaixas", "Soma Caixas", "Caixas")),
-            normNumZero(col(row, "SomaDePallets", "Soma Pallets", "Pallets")),
-            normNumZero(col(row, "SomaDeLitros", "Soma Litros", "Litros")),
-            normNumZero(col(row, "SomaDeValor NF", "Valor NF", "ValorNF")),
-            normNumZero(col(row, "SomaDeValor VBC", "Valor VBC", "ValorVBC")),
+            // [v4] ABS obrigatório — ver normNumAbs e chk_vendas_valor_positivo.
+            normNumAbs(col(row, "SomaDeCaixas", "Soma Caixas", "Caixas")),
+            normNumAbs(col(row, "SomaDePallets", "Soma Pallets", "Pallets")),
+            normNumAbs(col(row, "SomaDeLitros", "Soma Litros", "Litros")),
+            normNumAbs(col(row, "SomaDeValor NF", "Valor NF", "ValorNF")),
+            normNumAbs(col(row, "SomaDeValor VBC", "Valor VBC", "ValorVBC")),
             statusVenda,
             canalCliente,
             hierarquia,
@@ -641,9 +656,56 @@ async function processarRelatorioVendas(filePath, _usuarioId, logId, fileBuffer)
         "status=VALUES(status)",
         "importacao_id=VALUES(importacao_id)"
       ].join(",");
+      if (vendasRows.length === 0) {
+        const prodCarteira = /* @__PURE__ */ new Map();
+        for (const row of pedidosRows) {
+          const codItem = norm(col(row, "2nd Item Number", "COD_ITEM"));
+          if (codItem && !prodCarteira.has(codItem)) {
+            prodCarteira.set(codItem, [
+              codItem,
+              norm(col(row, "Ordem_Delivery.Description", "Descri\xE7\xE3o Produto")) || codItem,
+              norm(row["CATEGORIA"]),
+              norm(row["SUBCATEGORIA"]),
+              norm(col(row, "Segmento", "Segmento SKU")),
+              norm(col(row, "Categoria TOTAL", "Categoria TOTAL SKU"))
+            ]);
+          }
+        }
+        if (prodCarteira.size > 0) {
+          const arr = [...prodCarteira.values()];
+          const COLS_P = ["cod_item", "descricao", "categoria", "subcategoria", "segmento_sku", "categoria_total_sku"];
+          const DUP_P = "descricao=VALUES(descricao),categoria=COALESCE(VALUES(categoria),categoria),subcategoria=COALESCE(VALUES(subcategoria),subcategoria),segmento_sku=COALESCE(VALUES(segmento_sku),segmento_sku),categoria_total_sku=COALESCE(VALUES(categoria_total_sku),categoria_total_sku),updated_at=NOW()";
+          for (let i = 0; i < arr.length; i += IMPORT_CHUNK_SIZE) {
+            const c = arr.slice(i, i + IMPORT_CHUNK_SIZE);
+            try {
+              await (0, import_database.query)(bulkSql("produtos", COLS_P, c.length, DUP_P), c.flat());
+            } catch (e) {
+              errosLog.push(`Produtos (carteira) chunk ${i}: ${e.message}`);
+              console.error(`[import/produtos] Erro no chunk ${i}:`, e.message);
+            }
+          }
+          console.log(`[import/pedidos] ${prodCarteira.size} produto(s) da carteira processado(s)`);
+        }
+      }
+      const produtosExistentes = /* @__PURE__ */ new Set();
+      const clientesExistentes = /* @__PURE__ */ new Set();
+      try {
+        const [prodRes, cliRes] = await Promise.all([
+          (0, import_database.query)("SELECT cod_item FROM produtos"),
+          (0, import_database.query)("SELECT customer_number FROM clientes")
+        ]);
+        for (const r of prodRes.rows) produtosExistentes.add(String(r.cod_item));
+        for (const r of cliRes.rows) clientesExistentes.add(Number(r.customer_number));
+      } catch (e) {
+        console.error("[import/pedidos] Falha ao carregar chaves para valida\xE7\xE3o de FK:", e.message);
+      }
+      let pedidosSemProduto = 0;
+      let pedidosSemCliente = 0;
+      const pedidoChunks = [];
       for (let i = 0; i < pedidosRows.length; i += IMPORT_CHUNK_SIZE) {
         const chunk = pedidosRows.slice(i, i + IMPORT_CHUNK_SIZE);
         const params = [];
+        let rowCount = 0;
         for (const row of chunk) {
           const orderDate = normDate(row["Order Date"]);
           const mesDesc = norm(col(row, "M\xEAs", "Mes"));
@@ -657,15 +719,29 @@ async function processarRelatorioVendas(filePath, _usuarioId, logId, fileBuffer)
             console.warn(`[import/pedidos] Vendedor n\xE3o encontrado \u2014 Description2="${row["Description 2"]}"`);
           }
           const ano = orderDate ? parseInt(orderDate.substring(0, 4), 10) : (/* @__PURE__ */ new Date()).getUTCFullYear();
+          const orderNumber = normNum(row["OrderNumber"]);
+          const codItemRaw = norm(col(row, "2nd Item Number", "COD_ITEM"));
+          if (!orderNumber || !codItemRaw) continue;
+          let codItem = codItemRaw;
+          if (!produtosExistentes.has(codItemRaw)) {
+            codItem = null;
+            pedidosSemProduto++;
+          }
+          const customerNumberRaw = normNum(col(row, "Ship To Number", "Customer Number"));
+          let customerNumber = customerNumberRaw;
+          if (customerNumberRaw !== null && !clientesExistentes.has(Number(customerNumberRaw))) {
+            customerNumber = null;
+            pedidosSemCliente++;
+          }
           params.push(
-            normNum(col(row, "Ship To Number", "Customer Number")),
+            customerNumber,
             norm(col(row, "Alpha Name", "Customer Name")),
-            normNum(row["OrderNumber"]),
+            orderNumber,
             orderDate,
             vendedorId,
             norm(row["Vendedor.Description"]),
             normNum(row["Description 2"]),
-            norm(col(row, "2nd Item Number", "COD_ITEM")),
+            codItem,
             norm(col(row, "Ordem_Delivery.Description", "Descri\xE7\xE3o Produto")),
             norm(row["CATEGORIA"]),
             norm(row["SUBCATEGORIA"]),
@@ -684,16 +760,36 @@ async function processarRelatorioVendas(filePath, _usuarioId, logId, fileBuffer)
             norm(row["Status"]),
             logId
           );
+          rowCount++;
         }
-        try {
-          await (0, import_database.query)(bulkSql("pedidos_carteira", PEDIDO_COLS, chunk.length, PEDIDO_ON_DUP), params);
-          contadores.pedidos += chunk.length;
-          console.log(`[import/pedidos] chunk ${i}: ${chunk.length} registro(s) inserido(s)`);
-        } catch (e) {
-          contadores.erros += chunk.length;
-          errosLog.push(`Pedidos chunk ${i}: ${e.message}`);
-          console.error(`[import/pedidos] Erro no chunk ${i}:`, e.message);
-        }
+        if (rowCount === 0) continue;
+        pedidoChunks.push(params);
+      }
+      const numCols = PEDIDO_COLS.length;
+      try {
+        await (0, import_database.withTransaction)(async (client) => {
+          await client.query("DELETE FROM pedidos_carteira");
+          for (const params of pedidoChunks) {
+            const rowCount = params.length / numCols;
+            await client.query(
+              bulkSql("pedidos_carteira", PEDIDO_COLS, rowCount, PEDIDO_ON_DUP),
+              params
+            );
+            contadores.pedidos += rowCount;
+          }
+        });
+        console.log(`[import/pedidos] carteira substitu\xEDda: ${contadores.pedidos} registro(s) inserido(s)`);
+      } catch (e) {
+        contadores.erros += contadores.pedidos;
+        contadores.pedidos = 0;
+        errosLog.push(`Pedidos (substitui\xE7\xE3o da carteira): ${e.message}`);
+        console.error("[import/pedidos] Erro na substitui\xE7\xE3o da carteira (rollback aplicado):", e.message);
+      }
+      if (pedidosSemProduto > 0) {
+        console.warn(`[import/pedidos] ${pedidosSemProduto} linha(s) com cod_item fora de \`produtos\` \u2014 gravadas com cod_item=NULL`);
+      }
+      if (pedidosSemCliente > 0) {
+        console.warn(`[import/pedidos] ${pedidosSemCliente} linha(s) com customer_number fora de \`clientes\` \u2014 gravadas com customer_number=NULL`);
       }
     }
     await finalizarLog(logId, "concluido", contadores, errosLog, periodoRelatorio);

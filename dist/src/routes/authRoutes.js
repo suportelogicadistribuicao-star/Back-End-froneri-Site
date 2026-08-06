@@ -145,14 +145,15 @@ router.post("/register", async (req, res) => {
       return res.status(400).json({ erro: "Role inv\xE1lida. Use: admin, gerente ou vendedor." });
     }
     const senhaHash = await import_bcryptjs.default.hash(String(senha), 12);
-    const criadoInsert = await (0, import_database.query)(
-      `INSERT INTO usuarios (nome, email, senha_hash, role, ativo)
-             VALUES ($1, $2, $3, $4, TRUE)`,
-      [nomeNormalizado, emailNormalizado, senhaHash, roleFinal]
+    const usuarioId = (0, import_crypto.randomUUID)();
+    await (0, import_database.query)(
+      `INSERT INTO usuarios (id, nome, email, senha_hash, role, ativo)
+             VALUES ($1, $2, $3, $4, $5, TRUE)`,
+      [usuarioId, nomeNormalizado, emailNormalizado, senhaHash, roleFinal]
     );
     const criado = await (0, import_database.query)(
       "SELECT id, nome, email, role, ativo FROM usuarios WHERE id = $1",
-      [criadoInsert.insertId]
+      [usuarioId]
     );
     return res.status(201).json({
       mensagem: "Usu\xE1rio criado com sucesso.",

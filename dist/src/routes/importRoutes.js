@@ -167,8 +167,8 @@ router.get("/", ...protegido, async (_req, res) => {
 });
 router.get("/historico", ...protegido, async (req, res) => {
   try {
-    const rawLimit = Number(req.query.limit || 20);
-    const limit = Math.min(Math.max(rawLimit, 1), 100);
+    const rawLimit = Number(req.query.limit) || 20;
+    const limit = Math.min(Math.max(Math.trunc(rawLimit), 1), 100);
     const rows = await (0, import_database.query)(`
             SELECT
                 il.id, il.arquivo_nome, il.tipo_arquivo,

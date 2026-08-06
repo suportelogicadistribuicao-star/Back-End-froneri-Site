@@ -53,6 +53,14 @@ router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req,
       rupturaParams.push(filtroVendedor);
       rupturaWhere += ` AND vendedor_id = $${rupturaParams.length}`;
     }
+    if (canal) {
+      rupturaParams.push(canal);
+      rupturaWhere += ` AND canal_cliente = $${rupturaParams.length}`;
+    }
+    if (segmentacao) {
+      rupturaParams.push(segmentacao);
+      rupturaWhere += ` AND segmentacao_cliente = $${rupturaParams.length}`;
+    }
     const pedidosParams = [ano, mes];
     let pedidosWhere = "WHERE ano = $1 AND mes_numero = $2";
     if (filtroVendedor) {
@@ -62,22 +70,22 @@ router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req,
     const usarHistoricoClientes = await (0, import_clientesHistoricoService.hasRupturaForPeriodo)(mes, ano);
     const clientesKPIQuery = usarHistoricoClientes ? `
                 SELECT
-                    COUNT(DISTINCT r.customer_number) AS total_ativos,
-                    COUNT(DISTINCT CASE WHEN r.status_ruptura = 'C/ Compra'    THEN r.customer_number END) AS com_compra,
-                    COUNT(DISTINCT CASE WHEN r.status_ruptura = 'Cliente Novo' THEN r.customer_number END) AS novos,
-                    COUNT(DISTINCT CASE WHEN r.status_ruptura LIKE '%6 Meses%' THEN r.customer_number END) AS criticos,
-                    COUNT(DISTINCT CASE WHEN c.tem_contrato = TRUE THEN r.customer_number END) AS com_contrato
-                FROM ruptura r
-                LEFT JOIN clientes c ON c.customer_number = r.customer_number
-                WHERE r.mes_numero = $1 AND r.ano = $2
-                ${filtroVendedor ? "AND r.vendedor_id = $3" : ""}
+                    COUNT(*)                AS total_ativos,
+                    SUM(ra.eh_com_compra)   AS com_compra,
+                    SUM(ra.eh_cliente_novo) AS novos,
+                    SUM(ra.eh_mais_6_meses) AS criticos,
+                    SUM(CASE WHEN c.tem_contrato = TRUE THEN 1 ELSE 0 END) AS com_contrato
+                FROM vw_ruptura_avaliada ra
+                LEFT JOIN clientes c ON c.customer_number = ra.customer_number
+                WHERE ra.mes_numero = $1 AND ra.ano = $2
+                ${filtroVendedor ? "AND ra.vendedor_id = $3" : ""}
             ` : `
                 SELECT
                     COUNT(*) AS total_ativos,
                     COUNT(CASE WHEN nova_rup = 'C/ Compra'    THEN 1 END) AS com_compra,
                     COUNT(CASE WHEN nova_rup = 'Cliente Novo' THEN 1 END) AS novos,
                     COUNT(CASE WHEN nova_rup LIKE '%6 Meses%' THEN 1 END) AS criticos,
-                    COUNT(CASE WHEN tem_contrato = TRUE        THEN 1 END) AS com_contrato
+                    COUNT(CASE WHEN tem_contrato = TRUE       THEN 1 END) AS com_contrato
                 FROM clientes
                 WHERE status = 'C'
                 ${filtroVendedor ? "AND vendedor_id = $1" : ""}
@@ -85,32 +93,52 @@ router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req,
     const clientesKPIParams = usarHistoricoClientes ? filtroVendedor ? [mes, ano, filtroVendedor] : [mes, ano] : filtroVendedor ? [filtroVendedor] : [];
     const [
       vendasKPI,
+      devolucoesKPI,
       rupturaKPI,
       clientesKPI,
       pedidosKPI,
       vendasCategoria,
       vendasCanalRes,
       devedoresKPI,
-      vendasVendedorRes
+      vendasVendedorRes,
+      rupturaVendedorRes
     ] = await Promise.all([
+      // BRUTO — só VENDA.
       (0, import_database.query)(`
                 SELECT
-                    COUNT(DISTINCT customer_number)    AS clientes_atendidos,
-                    SUM(valor_nf)                      AS valor_total_nf,
-                    SUM(valor_vbc)                     AS valor_total_vbc,
-                    SUM(soma_caixas)                   AS total_caixas,
-                    SUM(soma_litros)                   AS total_litros
-                FROM vendas
+                    COUNT(DISTINCT customer_number) AS clientes_atendidos,
+                    COALESCE(SUM(valor_nf), 0)      AS valor_bruto_nf,
+                    COALESCE(SUM(valor_vbc), 0)     AS valor_bruto_vbc,
+                    COALESCE(SUM(soma_caixas), 0)   AS caixas_brutas,
+                    COALESCE(SUM(soma_litros), 0)   AS litros_brutos,
+                    COUNT(*)                        AS transacoes
+                FROM vw_vendas_validas
+                ${vendaWhere}
+            `, p),
+      // DEVOLUÇÕES — mesmo WHERE, view irmã. Magnitude positiva.
+      (0, import_database.query)(`
+                SELECT
+                    COALESCE(SUM(valor_nf), 0)    AS valor_devolucoes,
+                    COALESCE(SUM(valor_vbc), 0)   AS vbc_devolucoes,
+                    COALESCE(SUM(soma_caixas), 0) AS caixas_devolucoes,
+                    COALESCE(SUM(soma_litros), 0) AS litros_devolucoes,
+                    COUNT(*)                      AS qtd_devolucoes,
+                    COUNT(DISTINCT customer_number) AS clientes_com_devolucao
+                FROM vw_vendas_devolucao
                 ${vendaWhere}
             `, p),
       (0, import_database.query)(`
-    SELECT COUNT(DISTINCT r.customer_number) AS total_ruptura
-    FROM ruptura r
-    JOIN clientes c ON c.customer_number = r.customer_number
-    ${rupturaWhere.replace(/\bano\b/g, "r.ano").replace(/\bmes_numero\b/g, "r.mes_numero").replace(/\bvendedor_id\b/g, "r.vendedor_id")}
-    AND c.status = 'C'
-    AND r.status_ruptura NOT IN ('C/ Compra', 'Cliente Novo', 'SEM KV')
-`, rupturaParams),
+                SELECT
+                    SUM(eh_ruptura)                                    AS total_ruptura,
+                    SUM(entra_base)                                    AS base_avaliada,
+                    SUM(eh_com_compra)                                 AS com_compra,
+                    SUM(eh_cliente_novo)                               AS clientes_novos,
+                    SUM(eh_sem_kv)                                     AS sem_kv,
+                    SUM(eh_mais_6_meses)                               AS mais_6_meses,
+                    100 * SUM(eh_ruptura) / NULLIF(SUM(entra_base), 0) AS pct_ruptura
+                FROM vw_ruptura_avaliada
+                ${rupturaWhere}
+            `, rupturaParams),
       (0, import_database.query)(clientesKPIQuery, clientesKPIParams),
       (0, import_database.query)(`
                 SELECT
@@ -120,21 +148,33 @@ router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req,
                 FROM pedidos_carteira
                 ${pedidosWhere}
             `, pedidosParams),
+      // Categoria — vw_vendas_liquidas já traz devolução negativa,
+      // então SUM() é líquido direto. Sem UNION manual.
       (0, import_database.query)(`
-                SELECT categoria, SUM(valor_nf) AS valor, SUM(soma_caixas) AS caixas
-                FROM vendas
+                SELECT
+                    categoria,
+                    COALESCE(SUM(valor_nf), 0)    AS valor,
+                    COALESCE(SUM(soma_caixas), 0) AS caixas,
+                    COALESCE(SUM(CASE WHEN origem_linha = 'VENDA'
+                                      THEN valor_nf ELSE 0 END), 0) AS valor_bruto,
+                    COALESCE(SUM(CASE WHEN origem_linha = 'DEVOLUCAO'
+                                      THEN ABS(valor_nf) ELSE 0 END), 0) AS valor_devolucoes
+                FROM vw_vendas_liquidas
                 ${vendaWhere}
                 GROUP BY categoria
+                HAVING SUM(valor_nf) <> 0 OR SUM(soma_caixas) <> 0
                 ORDER BY valor DESC
             `, p),
       (0, import_database.query)(`
-                SELECT canal_cliente AS name, SUM(valor_nf) AS value
-                FROM vendas
+                SELECT
+                    canal_cliente              AS name,
+                    COALESCE(SUM(valor_nf), 0) AS value
+                FROM vw_vendas_liquidas
                 ${vendaWhere}
                 GROUP BY canal_cliente
+                HAVING SUM(valor_nf) <> 0
                 ORDER BY value DESC
             `, p),
-      // Devedores: usa INNER JOIN em vez de IN (subquery) para filtro por vendedor
       (0, import_database.query)(`
                 SELECT
                     COUNT(DISTINCT d.documento_cliente) AS total_devedores,
@@ -143,31 +183,85 @@ router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req,
                 FROM devedores d
                 ${filtroVendedor ? "INNER JOIN clientes c ON c.cnpj = d.documento_cliente AND c.vendedor_id = $1" : ""}
             `, filtroVendedor ? [filtroVendedor] : []),
-      // Vendas por Vendedor — somente admin/gerente
+      // Por vendedor — a view mensal já entrega os três números.
       !filtroVendedor ? (0, import_database.query)(`
                     SELECT
-                        v.nome AS vendedor_nome,
+                        v.nome  AS vendedor_nome,
                         v.setor,
-                        COALESCE(SUM(ve.valor_nf), 0) AS valor_nf,
-                        COUNT(DISTINCT ve.customer_number) AS clientes
+                        COALESCE(SUM(kp.valor_liquido), 0)      AS valor_nf,
+                        COALESCE(SUM(kp.valor_bruto), 0)        AS valor_bruto,
+                        COALESCE(SUM(kp.valor_devolucoes), 0)   AS valor_devolucoes,
+                        COALESCE(SUM(kp.clientes_atendidos), 0) AS clientes
                     FROM vendedores v
-                    LEFT JOIN vendas ve ON ve.vendedor_id = v.id
-                        AND ve.mes_numero = $1 AND ve.ano = $2
+                    LEFT JOIN vw_vendas_kpi_mensal kp
+                           ON kp.vendedor_id = v.id
+                          AND kp.mes_numero  = $1
+                          AND kp.ano         = $2
                     WHERE v.ativo = TRUE
                     GROUP BY v.id, v.nome, v.setor
                     ORDER BY valor_nf DESC
-                `, [mes, ano]) : Promise.resolve({ rows: [] })
+                `, [mes, ano]) : Promise.resolve({ rows: [] }),
+      !filtroVendedor ? (0, import_database.query)(`
+                    SELECT
+                        vendedor_id,
+                        vendedor_nome,
+                        setor,
+                        SUM(entra_base)                                    AS base_avaliada,
+                        SUM(eh_ruptura)                                    AS rupturas,
+                        100 * SUM(eh_ruptura) / NULLIF(SUM(entra_base), 0) AS pct_ruptura
+                    FROM vw_ruptura_avaliada
+                    ${rupturaWhere}
+                    GROUP BY vendedor_id, vendedor_nome, setor
+                    HAVING SUM(entra_base) > 0
+                    ORDER BY pct_ruptura DESC
+                `, rupturaParams) : Promise.resolve({ rows: [] })
     ]);
+    const vb = vendasKPI.rows[0] ?? {};
+    const dv = devolucoesKPI.rows[0] ?? {};
+    const n = (x) => Number(x ?? 0);
+    const valorBrutoNf = n(vb.valor_bruto_nf);
+    const valorBrutoVbc = n(vb.valor_bruto_vbc);
+    const caixasBrutas = n(vb.caixas_brutas);
+    const litrosBrutos = n(vb.litros_brutos);
+    const clientes = n(vb.clientes_atendidos);
+    const valorDevolucoes = n(dv.valor_devolucoes);
+    const vbcDevolucoes = n(dv.vbc_devolucoes);
+    const caixasDevolucoes = n(dv.caixas_devolucoes);
+    const litrosDevolucoes = n(dv.litros_devolucoes);
+    const valorLiquido = valorBrutoNf - valorDevolucoes;
     res.json({
       periodo: { mes, ano },
-      vendas: vendasKPI.rows[0],
+      vendas: {
+        clientes_atendidos: clientes,
+        transacoes: n(vb.transacoes),
+        // Líquidos — o que os cards devem exibir.
+        valor_total_nf: valorLiquido,
+        valor_total_vbc: valorBrutoVbc - vbcDevolucoes,
+        total_caixas: caixasBrutas - caixasDevolucoes,
+        total_litros: litrosBrutos - litrosDevolucoes,
+        // Brutos — para o front mostrar a composição do número.
+        valor_bruto_nf: valorBrutoNf,
+        valor_bruto_vbc: valorBrutoVbc,
+        caixas_brutas: caixasBrutas,
+        litros_brutos: litrosBrutos,
+        // Devoluções — sempre POSITIVAS (magnitude abatida).
+        valor_devolucoes: valorDevolucoes,
+        vbc_devolucoes: vbcDevolucoes,
+        caixas_devolucoes: caixasDevolucoes,
+        litros_devolucoes: litrosDevolucoes,
+        qtd_devolucoes: n(dv.qtd_devolucoes),
+        clientes_com_devolucao: n(dv.clientes_com_devolucao),
+        pct_devolucao: valorBrutoNf > 0 ? valorDevolucoes / valorBrutoNf * 100 : 0,
+        ticket_medio: clientes > 0 ? valorLiquido / clientes : 0
+      },
       ruptura: rupturaKPI.rows[0],
       clientes: { ...clientesKPI.rows[0], _fonte: usarHistoricoClientes ? "historico" : "atual" },
       pedidos: pedidosKPI.rows[0],
       devedores: devedoresKPI.rows[0],
       vendasPorCategoria: vendasCategoria.rows,
       vendasPorCanal: vendasCanalRes.rows,
-      vendasPorVendedor: vendasVendedorRes.rows
+      vendasPorVendedor: vendasVendedorRes.rows,
+      rupturaPorVendedor: rupturaVendedorRes.rows
     });
   } catch (err) {
     console.error("[dashboard]", err);
@@ -176,7 +270,7 @@ router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req,
 });
 router.get("/tendencia", import_auth.authMiddleware, import_auth.ownDataOnly, async (req, res) => {
   try {
-    const meses = Math.min(Number(req.query.meses || "6"), 12);
+    const meses = Math.min(Math.max(Math.trunc(Number(req.query.meses) || 6), 1), 12);
     const filtroVendedor = req.filtroVendedor;
     const now = /* @__PURE__ */ new Date();
     const refDate = new Date(now.getFullYear(), now.getMonth() - meses + 1, 1);
@@ -192,20 +286,117 @@ router.get("/tendencia", import_auth.authMiddleware, import_auth.ownDataOnly, as
             SELECT
                 mes_numero,
                 ano,
-                mes_descricao,
-                SUM(valor_nf)                   AS valor_nf,
-                SUM(soma_litros)                AS litros,
-                COUNT(DISTINCT customer_number) AS clientes
-            FROM vendas
+                MAX(mes_descricao)         AS mes_descricao,
+                COALESCE(SUM(valor_nf), 0) AS valor_nf,
+                COALESCE(SUM(CASE WHEN origem_linha = 'VENDA'
+                                  THEN valor_nf ELSE 0 END), 0) AS valor_bruto,
+                COALESCE(SUM(CASE WHEN origem_linha = 'DEVOLUCAO'
+                                  THEN ABS(valor_nf) ELSE 0 END), 0) AS valor_devolucoes,
+                COALESCE(SUM(soma_litros), 0) AS litros,
+                COUNT(DISTINCT CASE WHEN origem_linha = 'VENDA'
+                                    THEN customer_number END) AS clientes
+            FROM vw_vendas_liquidas
             WHERE (ano > $1 OR (ano = $2 AND mes_numero >= $3))
             ${extraWhere}
-            GROUP BY mes_numero, ano, mes_descricao
+            GROUP BY mes_numero, ano
             ORDER BY ano, mes_numero
         `, p);
     res.json(rows.rows);
   } catch (err) {
     console.error("[dashboard/tendencia]", err);
     res.status(500).json({ erro: "Erro ao carregar tend\xEAncia." });
+  }
+});
+router.get("/comparativo-anual", import_auth.authMiddleware, import_auth.ownDataOnly, async (req, res) => {
+  try {
+    const now = /* @__PURE__ */ new Date();
+    const anoAtual = req.query.ano === void 0 || req.query.ano === "" ? now.getFullYear() : Number(req.query.ano);
+    if (!Number.isInteger(anoAtual) || anoAtual < 1900 || anoAtual > 3e3) {
+      return res.status(400).json({ erro: "Par\xE2metro ano inv\xE1lido." });
+    }
+    const anoAnterior = anoAtual - 1;
+    const canal = req.query.canal || null;
+    const segmentacao = req.query.segmentacao || null;
+    const filtroVendedor = req.filtroVendedor;
+    const p = [anoAnterior, anoAtual];
+    let where = "WHERE ano IN ($1, $2)";
+    if (filtroVendedor) {
+      p.push(filtroVendedor);
+      where += ` AND vendedor_id = $${p.length}`;
+    }
+    if (canal) {
+      p.push(canal);
+      where += ` AND canal_cliente = $${p.length}`;
+    }
+    if (segmentacao) {
+      p.push(segmentacao);
+      where += ` AND segmentacao_cliente = $${p.length}`;
+    }
+    const rows = await (0, import_database.query)(`
+            SELECT
+                ano,
+                mes_numero,
+                COALESCE(SUM(valor_nf), 0) AS valor_liquido,
+                COALESCE(SUM(CASE WHEN origem_linha = 'VENDA'
+                                  THEN valor_nf ELSE 0 END), 0) AS valor_bruto,
+                COALESCE(SUM(CASE WHEN origem_linha = 'DEVOLUCAO'
+                                  THEN ABS(valor_nf) ELSE 0 END), 0) AS valor_devolucoes,
+                COALESCE(SUM(soma_caixas), 0) AS caixas,
+                COUNT(DISTINCT CASE WHEN origem_linha = 'VENDA'
+                                    THEN customer_number END) AS clientes
+            FROM vw_vendas_liquidas
+            ${where}
+            GROUP BY ano, mes_numero
+            ORDER BY ano, mes_numero
+        `, p);
+    const chave = (ano, mes) => `${ano}-${mes}`;
+    const mapa = /* @__PURE__ */ new Map();
+    for (const r of rows.rows) {
+      mapa.set(chave(Number(r.ano), Number(r.mes_numero)), r);
+    }
+    const n = (x) => Number(x ?? 0);
+    const meses = Array.from({ length: 12 }, (_, i) => {
+      const mesNumero = i + 1;
+      const atual = mapa.get(chave(anoAtual, mesNumero));
+      const anterior = mapa.get(chave(anoAnterior, mesNumero));
+      const valorAtual = n(atual?.valor_liquido);
+      const valorAnterior = n(anterior?.valor_liquido);
+      const variacaoPct = valorAnterior > 0 ? (valorAtual - valorAnterior) / valorAnterior * 100 : null;
+      return {
+        mes_numero: mesNumero,
+        valor_atual: valorAtual,
+        valor_anterior: valorAnterior,
+        bruto_atual: n(atual?.valor_bruto),
+        bruto_anterior: n(anterior?.valor_bruto),
+        devolucoes_atual: n(atual?.valor_devolucoes),
+        devolucoes_anterior: n(anterior?.valor_devolucoes),
+        caixas_atual: n(atual?.caixas),
+        caixas_anterior: n(anterior?.caixas),
+        clientes_atual: n(atual?.clientes),
+        clientes_anterior: n(anterior?.clientes),
+        variacao_pct: variacaoPct
+      };
+    });
+    const ultimoMesComDado = meses.reduce(
+      (ult, m) => m.valor_atual !== 0 || m.bruto_atual !== 0 ? m.mes_numero : ult,
+      0
+    );
+    const janela = meses.slice(0, ultimoMesComDado);
+    const totalAtual = janela.reduce((s, m) => s + m.valor_atual, 0);
+    const totalAnterior = janela.reduce((s, m) => s + m.valor_anterior, 0);
+    const variacaoAnual = totalAnterior > 0 ? (totalAtual - totalAnterior) / totalAnterior * 100 : null;
+    res.json({
+      ano_atual: anoAtual,
+      ano_anterior: anoAnterior,
+      total_atual: totalAtual,
+      total_anterior: totalAnterior,
+      variacao_anual_pct: variacaoAnual,
+      meses_comparados: ultimoMesComDado,
+      meses
+    });
+  } catch (err) {
+    console.error("[dashboard/comparativo-anual]", err);
+    res.status(500).json({ erro: "Erro ao carregar comparativo anual." });
   }
 });
 var dashboardRoutes_default = router;

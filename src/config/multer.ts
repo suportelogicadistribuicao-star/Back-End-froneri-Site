@@ -47,6 +47,31 @@ const upload = multer({
     limits: { fileSize: UPLOAD_MAX_SIZE_MB * 1024 * 1024 }
 });
 
+// ── Fotos das solicitações de cadastro ───────────────────────────────────────
+// Instância separada porque a política é outra: imagens/PDF (não planilhas),
+// até 5 arquivos de 100 MB. Reusa o mesmo diskStorage temporário — a rota
+// sobe os arquivos para o B2 e apaga o temporário na sequência.
+export const FOTOS_MAX_ARQUIVOS = 5;
+export const FOTO_MAX_SIZE_MB = parseInt(process.env.FOTO_MAX_SIZE_MB || '100', 10);
+
+const FOTO_ALLOWED_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.gif', '.webp', '.heic', '.heif', '.bmp', '.pdf'];
+
+const fotoFilter = (_req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    const mimeOk = file.mimetype?.startsWith('image/') || file.mimetype === 'application/pdf';
+    if (mimeOk || FOTO_ALLOWED_EXTENSIONS.includes(ext)) {
+        cb(null, true);
+    } else {
+        cb(new Error('Apenas imagens ou PDF são aceitos como foto da solicitação.'));
+    }
+};
+
+export const uploadFotos = multer({
+    storage,
+    fileFilter: fotoFilter,
+    limits: { fileSize: FOTO_MAX_SIZE_MB * 1024 * 1024, files: FOTOS_MAX_ARQUIVOS }
+});
+
 const UPLOAD_STALE_MINUTES = parseInt(process.env.UPLOAD_STALE_MINUTES || '60', 10);
 
 // Remove arquivos esquecidos em UPLOAD_DIR (ex.: sobras de um processo morto

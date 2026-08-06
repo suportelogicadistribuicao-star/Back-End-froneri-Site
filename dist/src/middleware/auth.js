@@ -62,9 +62,10 @@ function requireRole(...roles) {
 }
 function ownDataOnly(req, res, next) {
   if (["admin", "gerente"].includes(req.usuario?.role)) return next();
-  if (req.usuario?.vendedor_id) {
-    req.filtroVendedor = req.usuario.vendedor_id;
+  if (!req.usuario?.vendedor_id) {
+    return res.status(403).json({ erro: "Usu\xE1rio sem vendedor vinculado. Contate o administrador." });
   }
+  req.filtroVendedor = req.usuario.vendedor_id;
   next();
 }
 // Annotate the CommonJS export names for ESM import in node:

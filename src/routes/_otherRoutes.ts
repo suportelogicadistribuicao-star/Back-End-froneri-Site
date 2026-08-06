@@ -358,44 +358,6 @@ rotRouter.delete('/:id', authMiddleware, async (req, res) => {
     }
 });
 
-// ─── cadastrosRoutes.js ───────────────────────────────────────────────────────
-const cadRouter = express.Router();
-
-cadRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
-    try {
-        const { status, vendedor_id, page = 1, limit = 50 } = req.query;
-        const vendedorQuery = vendedor_id !== undefined && vendedor_id !== '' ? Number(vendedor_id) : null;
-        if (vendedorQuery !== null && !Number.isFinite(vendedorQuery)) {
-            return res.status(400).json({ erro: 'Parâmetro vendedor_id inválido.' });
-        }
-        const fvId = req.filtroVendedor ?? vendedorQuery;
-        const where = [];
-        const params = [];
-        let p = 1;
-
-        if (fvId)  { where.push(`c.vendedor_id = $${p++}`); params.push(fvId); }
-        if (status){ where.push(`c.status = $${p++}`);      params.push(status); }
-
-        const wStr = where.length ? 'WHERE ' + where.join(' AND ') : '';
-        const pageNum  = Math.max(Number(page) || 1, 1);
-        const limitNum = Math.min(Math.max(Number(limit) || 50, 1), 2000);
-        const offset   = (pageNum - 1) * limitNum;
-
-        const rows = await query(`
-            SELECT c.*, v.nome AS vendedor_nome
-            FROM cadastros c
-            LEFT JOIN vendedores v ON v.id = c.vendedor_id
-            ${wStr}
-            ORDER BY c.created_at DESC
-            LIMIT $${p++} OFFSET $${p++}
-        `, [...params, limitNum, offset]);
-
-        res.json(rows.rows);
-    } catch (err) {
-        res.status(500).json({ erro: 'Erro ao listar cadastros.' });
-    }
-});
-
 // ─── ticketsRoutes.js ─────────────────────────────────────────────────────────
 const tickRouter = express.Router();
 
@@ -453,4 +415,4 @@ devRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
     }
 });
 
-export { rupturaRouter, rotRouter, cadRouter, tickRouter, devRouter };
+export { rupturaRouter, rotRouter, tickRouter, devRouter };

@@ -27,10 +27,13 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 var multer_exports = {};
 __export(multer_exports, {
+  FOTOS_MAX_ARQUIVOS: () => FOTOS_MAX_ARQUIVOS,
+  FOTO_MAX_SIZE_MB: () => FOTO_MAX_SIZE_MB,
   UPLOAD_DIR: () => UPLOAD_DIR,
   default: () => multer_default,
   ensureUploadDir: () => ensureUploadDir,
-  limparArquivosAntigos: () => limparArquivosAntigos
+  limparArquivosAntigos: () => limparArquivosAntigos,
+  uploadFotos: () => uploadFotos
 });
 module.exports = __toCommonJS(multer_exports);
 var import_multer = __toESM(require("multer"));
@@ -67,6 +70,23 @@ const upload = (0, import_multer.default)({
   fileFilter,
   limits: { fileSize: import_uploadPolicy.UPLOAD_MAX_SIZE_MB * 1024 * 1024 }
 });
+const FOTOS_MAX_ARQUIVOS = 5;
+const FOTO_MAX_SIZE_MB = parseInt(process.env.FOTO_MAX_SIZE_MB || "100", 10);
+const FOTO_ALLOWED_EXTENSIONS = [".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif", ".bmp", ".pdf"];
+const fotoFilter = (_req, file, cb) => {
+  const ext = import_path.default.extname(file.originalname).toLowerCase();
+  const mimeOk = file.mimetype?.startsWith("image/") || file.mimetype === "application/pdf";
+  if (mimeOk || FOTO_ALLOWED_EXTENSIONS.includes(ext)) {
+    cb(null, true);
+  } else {
+    cb(new Error("Apenas imagens ou PDF s\xE3o aceitos como foto da solicita\xE7\xE3o."));
+  }
+};
+const uploadFotos = (0, import_multer.default)({
+  storage,
+  fileFilter: fotoFilter,
+  limits: { fileSize: FOTO_MAX_SIZE_MB * 1024 * 1024, files: FOTOS_MAX_ARQUIVOS }
+});
 const UPLOAD_STALE_MINUTES = parseInt(process.env.UPLOAD_STALE_MINUTES || "60", 10);
 function limparArquivosAntigos() {
   ensureUploadDir();
@@ -88,7 +108,10 @@ function limparArquivosAntigos() {
 var multer_default = upload;
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  FOTOS_MAX_ARQUIVOS,
+  FOTO_MAX_SIZE_MB,
   UPLOAD_DIR,
   ensureUploadDir,
-  limparArquivosAntigos
+  limparArquivosAntigos,
+  uploadFotos
 });
