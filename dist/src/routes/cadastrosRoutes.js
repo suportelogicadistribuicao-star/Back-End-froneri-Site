@@ -57,8 +57,37 @@ const CAMPOS_OBRIGATORIOS = [
   "modelo_freezer",
   "horario_recebimento_freezer"
 ];
-const SOLD_GERADO_MIN = 900000001;
-const SOLD_GERADO_MAX = 999999999;
+const CONECTIVOS_NOME = /* @__PURE__ */ new Set(["de", "da", "do", "das", "dos", "e"]);
+function tokensDoNome(valor) {
+  return String(valor ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((t) => t && !CONECTIVOS_NOME.has(t));
+}
+async function vendedorPorNome(nome) {
+  const alvo = new Set(tokensDoNome(nome));
+  if (alvo.size === 0) return null;
+  const res = await (0, import_database.query)("SELECT id, nome FROM vendedores WHERE ativo = TRUE");
+  const candidatos = res.rows.filter((v) => {
+    const tokens = tokensDoNome(v.nome);
+    return tokens.length > 0 && tokens.every((t) => alvo.has(t));
+  });
+  return candidatos.length === 1 ? candidatos[0].id : null;
+}
+async function resolverVendedor(existente, body) {
+  if (existente.vendedor_id) return { id: existente.vendedor_id };
+  const informado = body?.vendedor_id ?? body?.codigo_vendedor;
+  if (informado !== void 0 && informado !== null && String(informado).trim() !== "") {
+    const chave = String(informado).trim();
+    const coluna = /^\d+$/.test(chave) ? "codigo_vendedor" : "id";
+    const res = await (0, import_database.query)(`SELECT id FROM vendedores WHERE ${coluna} = $1 LIMIT 1`, [chave]);
+    if (!res.rows[0]) return { erro: `Vendedor n\xE3o encontrado: ${chave}.` };
+    return { id: res.rows[0].id };
+  }
+  const porNome = await vendedorPorNome(existente.vendedor_territorio);
+  if (porNome) return { id: porNome };
+  const territorio = existente.vendedor_territorio ? ` ("${existente.vendedor_territorio}")` : "";
+  return {
+    erro: `Solicita\xE7\xE3o sem vendedor vinculado, e o nome em "Vendedor - Territ\xF3rio"${territorio} n\xE3o identifica um \xFAnico vendedor ativo. Informe vendedor_id ou codigo_vendedor no corpo da requisi\xE7\xE3o para concluir.`
+  };
+}
 function validarCampos(body) {
   const dados = {};
   for (const campo of CAMPOS_OBRIGATORIOS) {
@@ -154,6 +183,10 @@ async function montarCadastro(row) {
     fotos,
     status: row.status,
     observacao: row.observacao ?? null,
+    // SOLD só existe depois que a planilha da Froneri traz o número — até lá
+    // a solicitação está concluída com cliente_id preenchido e sold nulo.
+    cliente_id: row.cliente_id ?? null,
+    customer_number: row.customer_number ?? null,
     codigo_vendedor: row.codigo_vendedor != null ? String(row.codigo_vendedor) : null,
     vendedor_nome: row.vendedor_nome_atual ?? row.vendedor_nome ?? null,
     criado_em: paraIso(row.created_at),
@@ -229,11 +262,8 @@ router.post("/", import_auth.authMiddleware, import_auth.ownDataOnly, uploadFoto
   try {
     const { erro, dados } = validarCampos(req.body || {});
     if (erro) return res.status(400).json({ erro });
-    if (files.length === 0) {
-      return res.status(400).json({ erro: "Envie ao menos 1 foto do ponto de venda." });
-    }
     const id = (0, import_crypto.randomUUID)();
-    const chaves = await subirFotosParaB2(files, id);
+    const chaves = files.length ? await subirFotosParaB2(files, id) : [];
     try {
       await (0, import_database.query)(`
                 INSERT INTO cadastros (
@@ -339,45 +369,41 @@ router.put("/:id/status", import_auth.authMiddleware, (0, import_auth.requireRol
     const existente = await buscarCadastro(req.params.id);
     if (!existente) return res.status(404).json({ erro: "Solicita\xE7\xE3o de cadastro n\xE3o encontrada." });
     const novaObservacao = observacao !== void 0 ? String(observacao).trim() || null : existente.observacao;
-    if (String(status) === "concluido" && !existente.customer_number) {
+    if (String(status) === "concluido" && !existente.cliente_id) {
+      const vendedor = await resolverVendedor(existente, req.body || {});
+      if (vendedor.erro) return res.status(400).json({ erro: vendedor.erro });
+      const vendedorId = vendedor.id;
+      const clienteId = (0, import_crypto.randomUUID)();
+      const cnpjDigitos = String(existente.cnpj ?? "").replace(/\D/g, "") || null;
       await (0, import_database.withTransaction)(async (client) => {
-        const proximoRes = await client.query(`
-                    SELECT COALESCE(MAX(customer_number), ${SOLD_GERADO_MIN - 1}) + 1 AS proximo
-                    FROM clientes
-                    WHERE customer_number BETWEEN ${SOLD_GERADO_MIN} AND ${SOLD_GERADO_MAX}
-                `);
-        const customerNumber = Number(proximoRes.rows[0].proximo);
-        let territoryNumber = null;
-        if (existente.vendedor_id) {
-          const vRes = await client.query(
-            "SELECT territory_number FROM vendedores WHERE id = $1",
-            [existente.vendedor_id]
-          );
-          territoryNumber = vRes.rows[0]?.territory_number ?? null;
-        }
+        const vRes = await client.query(
+          "SELECT territory_number FROM vendedores WHERE id = $1",
+          [vendedorId]
+        );
+        const territoryNumber = vRes.rows[0]?.territory_number ?? null;
         await client.query(`
                     INSERT INTO clientes (
-                        id, customer_number, customer_name, cnpj, city, canal_cliente,
+                        id, customer_name, cnpj, city, canal_cliente,
                         telefone, status, nova_rup, vendedor_id, territory_number, observacao
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 `, [
-          (0, import_crypto.randomUUID)(),
-          customerNumber,
+          clienteId,
           existente.razao_social,
-          existente.cnpj,
+          cnpjDigitos,
           existente.cidade,
           existente.canal_cliente,
           existente.telefone,
           "C",
           "Cliente Novo",
-          existente.vendedor_id,
+          vendedorId,
           territoryNumber,
           `Criado a partir da solicita\xE7\xE3o de cadastro ${existente.id}`
         ]);
-        await client.query(
-          "UPDATE cadastros SET status = $1, observacao = $2, customer_number = $3 WHERE id = $4",
-          ["concluido", novaObservacao, customerNumber, existente.id]
-        );
+        await client.query(`
+                    UPDATE cadastros
+                    SET status = $1, observacao = $2, cliente_id = $3, vendedor_id = $4
+                    WHERE id = $5
+                `, ["concluido", novaObservacao, clienteId, vendedorId, existente.id]);
       });
     } else {
       await (0, import_database.query)(

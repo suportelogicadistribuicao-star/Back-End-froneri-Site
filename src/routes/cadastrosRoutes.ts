@@ -1,10 +1,12 @@
 // ─── Cadastros: solicitações de abertura de novos clientes ───────────────────
 // Contrato definido pelo front (src/api/cadastros/*.ts + iCadastros.tsx):
 //   GET    /api/cadastros            → lista (vendedor vê só as dele)
-//   POST   /api/cadastros            → cria (multipart, fotos obrigatórias)
+//   POST   /api/cadastros            → cria (multipart, fotos opcionais)
 //   PUT    /api/cadastros/:id        → edição completa (admin/gerente, multipart)
 //   PUT    /api/cadastros/:id/status → muda status (admin/gerente, JSON);
 //                                      'concluido' cria o cliente em `clientes`
+//                                      SEM SOLD — quem emite o SOLD é a Froneri,
+//                                      e a importação o preenche depois
 //   DELETE /api/cadastros/:id        → exclui (vendedor: só a própria, pendente/em_analise)
 // As fotos ficam no Backblaze B2 (chaves gravadas no JSON `fotos`); a API
 // devolve URLs assinadas de leitura, prontas para abrir no navegador.
@@ -31,10 +33,66 @@ const CAMPOS_OBRIGATORIOS = [
     'modelo_freezer', 'horario_recebimento_freezer',
 ];
 
-// Faixa reservada para SOLDs gerados pelo sistema ao concluir uma solicitação —
-// não colide com os customer_numbers reais que a Froneri manda nas planilhas.
-const SOLD_GERADO_MIN = 900000001;
-const SOLD_GERADO_MAX = 999999999;
+// ─── Resolução do vendedor da solicitação ────────────────────────────────────
+// Concluir cria um cliente definitivo, e cliente sem vendedor nasce órfão:
+// invisível para o próprio vendedor (todas as telas filtram por vendedor_id) e
+// sem territory_number. Solicitação aberta por admin/gerente não tem
+// vendedor_id — vem só o nome escolhido em "Vendedor - Território".
+const CONECTIVOS_NOME = new Set(['de', 'da', 'do', 'das', 'dos', 'e']);
+
+function tokensDoNome(valor: unknown): string[] {
+    return String(valor ?? '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, ' ')
+        .split(/\s+/)
+        .filter((t) => t && !CONECTIVOS_NOME.has(t));
+}
+
+// A lista fixa do formulário não bate 1:1 com `vendedores.nome` ("Nicolas De
+// Souza Passafaro" no form × "Nicolas Passafaro" no cadastro). Comparar por
+// tokens — sem acento, caixa ou conectivo — cobre a diferença; exigir match
+// ÚNICO evita escolher o vendedor errado entre sobrenomes repetidos
+// (ex.: "Alexandre Passafaro" também existe).
+async function vendedorPorNome(nome: unknown): Promise<string | null> {
+    const alvo = new Set(tokensDoNome(nome));
+    if (alvo.size === 0) return null;
+
+    const res = await query('SELECT id, nome FROM vendedores WHERE ativo = TRUE');
+    const candidatos = res.rows.filter((v: any) => {
+        const tokens = tokensDoNome(v.nome);
+        return tokens.length > 0 && tokens.every((t) => alvo.has(t));
+    });
+    return candidatos.length === 1 ? candidatos[0].id : null;
+}
+
+// Ordem: vínculo da própria solicitação → vendedor informado pela gestão no
+// corpo do PUT → nome do "Vendedor - Território" do formulário. Sem nenhum
+// deles a conclusão é recusada, em vez de gravar um cliente órfão.
+async function resolverVendedor(existente: any, body: any): Promise<{ id?: string; erro?: string }> {
+    if (existente.vendedor_id) return { id: existente.vendedor_id };
+
+    const informado = body?.vendedor_id ?? body?.codigo_vendedor;
+    if (informado !== undefined && informado !== null && String(informado).trim() !== '') {
+        const chave = String(informado).trim();
+        // Coluna vem de whitelist — nunca da entrada do usuário.
+        const coluna = /^\d+$/.test(chave) ? 'codigo_vendedor' : 'id';
+        const res = await query(`SELECT id FROM vendedores WHERE ${coluna} = $1 LIMIT 1`, [chave]);
+        if (!res.rows[0]) return { erro: `Vendedor não encontrado: ${chave}.` };
+        return { id: res.rows[0].id };
+    }
+
+    const porNome = await vendedorPorNome(existente.vendedor_territorio);
+    if (porNome) return { id: porNome };
+
+    const territorio = existente.vendedor_territorio ? ` ("${existente.vendedor_territorio}")` : '';
+    return {
+        erro: `Solicitação sem vendedor vinculado, e o nome em "Vendedor - Território"${territorio}`
+            + ' não identifica um único vendedor ativo. Informe vendedor_id ou codigo_vendedor'
+            + ' no corpo da requisição para concluir.',
+    };
+}
 
 function validarCampos(body: Record<string, any>): { erro?: string; dados?: Record<string, any> } {
     const dados: Record<string, any> = {};
@@ -144,6 +202,10 @@ async function montarCadastro(row: any): Promise<Record<string, any>> {
         fotos,
         status: row.status,
         observacao: row.observacao ?? null,
+        // SOLD só existe depois que a planilha da Froneri traz o número — até lá
+        // a solicitação está concluída com cliente_id preenchido e sold nulo.
+        cliente_id: row.cliente_id ?? null,
+        customer_number: row.customer_number ?? null,
         codigo_vendedor: row.codigo_vendedor != null ? String(row.codigo_vendedor) : null,
         vendedor_nome: row.vendedor_nome_atual ?? row.vendedor_nome ?? null,
         criado_em: paraIso(row.created_at),
@@ -238,12 +300,9 @@ router.post('/', authMiddleware, ownDataOnly, uploadFotosMiddleware, async (req,
     try {
         const { erro, dados } = validarCampos(req.body || {});
         if (erro) return res.status(400).json({ erro });
-        if (files.length === 0) {
-            return res.status(400).json({ erro: 'Envie ao menos 1 foto do ponto de venda.' });
-        }
 
         const id = randomUUID();
-        const chaves = await subirFotosParaB2(files, id);
+        const chaves = files.length ? await subirFotosParaB2(files, id) : [];
 
         try {
             await query(`
@@ -342,43 +401,49 @@ router.put('/:id/status', authMiddleware, requireRole('admin', 'gerente'), async
             ? (String(observacao).trim() || null)
             : existente.observacao;
 
-        if (String(status) === 'concluido' && !existente.customer_number) {
+        if (String(status) === 'concluido' && !existente.cliente_id) {
             // Efeito colateral crítico: cria o cliente definitivo vinculado ao
-            // vendedor da solicitação. customer_number já preenchido = cliente
-            // criado numa conclusão anterior, não duplica.
-            await withTransaction(async (client) => {
-                const proximoRes = await client.query(`
-                    SELECT COALESCE(MAX(customer_number), ${SOLD_GERADO_MIN - 1}) + 1 AS proximo
-                    FROM clientes
-                    WHERE customer_number BETWEEN ${SOLD_GERADO_MIN} AND ${SOLD_GERADO_MAX}
-                `);
-                const customerNumber = Number(proximoRes.rows[0].proximo);
+            // vendedor da solicitação. cliente_id já preenchido = cliente criado
+            // numa conclusão anterior, não duplica.
+            const vendedor = await resolverVendedor(existente, req.body || {});
+            if (vendedor.erro) return res.status(400).json({ erro: vendedor.erro });
+            const vendedorId = vendedor.id as string;
 
-                let territoryNumber: number | null = null;
-                if (existente.vendedor_id) {
-                    const vRes = await client.query(
-                        'SELECT territory_number FROM vendedores WHERE id = $1',
-                        [existente.vendedor_id]
-                    );
-                    territoryNumber = vRes.rows[0]?.territory_number ?? null;
-                }
+            // Sem customer_number: o SOLD é emitido pela Froneri e chega pela
+            // planilha. Até lá o cliente vive só em `clientes`, identificado pelo
+            // uuid. Nada de ruptura/snapshot mensal aqui — as duas tabelas são
+            // chaveadas por customer_number, e a importação as preenche sozinha
+            // assim que o SOLD chega (ver adotarClientesSemSold no importService).
+            //
+            // CNPJ vai só com dígitos, no mesmo formato que a importação grava —
+            // é por ele que o cliente pendente é casado com a linha da planilha.
+            const clienteId = randomUUID();
+            const cnpjDigitos = String(existente.cnpj ?? '').replace(/\D/g, '') || null;
+
+            await withTransaction(async (client) => {
+                const vRes = await client.query(
+                    'SELECT territory_number FROM vendedores WHERE id = $1',
+                    [vendedorId]
+                );
+                const territoryNumber = vRes.rows[0]?.territory_number ?? null;
 
                 await client.query(`
                     INSERT INTO clientes (
-                        id, customer_number, customer_name, cnpj, city, canal_cliente,
+                        id, customer_name, cnpj, city, canal_cliente,
                         telefone, status, nova_rup, vendedor_id, territory_number, observacao
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 `, [
-                    randomUUID(), customerNumber, existente.razao_social, existente.cnpj,
+                    clienteId, existente.razao_social, cnpjDigitos,
                     existente.cidade, existente.canal_cliente, existente.telefone,
-                    'C', 'Cliente Novo', existente.vendedor_id, territoryNumber,
+                    'C', 'Cliente Novo', vendedorId, territoryNumber,
                     `Criado a partir da solicitação de cadastro ${existente.id}`,
                 ]);
 
-                await client.query(
-                    'UPDATE cadastros SET status = $1, observacao = $2, customer_number = $3 WHERE id = $4',
-                    ['concluido', novaObservacao, customerNumber, existente.id]
-                );
+                await client.query(`
+                    UPDATE cadastros
+                    SET status = $1, observacao = $2, cliente_id = $3, vendedor_id = $4
+                    WHERE id = $5
+                `, ['concluido', novaObservacao, clienteId, vendedorId, existente.id]);
             });
         } else {
             await query(

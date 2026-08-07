@@ -21,6 +21,7 @@ __export(clientesRoutes_exports, {
 });
 module.exports = __toCommonJS(clientesRoutes_exports);
 var import_express = require("express");
+var import_crypto = require("crypto");
 var import_database = require("../config/database");
 var import_auth = require("../middleware/auth");
 var import_clientesHistoricoService = require("../services/clientesHistoricoService");
@@ -46,16 +47,19 @@ function pickClienteFields(body) {
   }
   return data;
 }
-async function existsClienteForScope(customerNumber, filtroVendedor) {
-  const scoped = await (0, import_database.query)(
-    `SELECT 1
-         FROM clientes c
-         WHERE c.customer_number = $1
-           ${filtroVendedor ? "AND c.vendedor_id = $2" : ""}
+async function resolverCliente(param, filtroVendedor) {
+  const chave = String(param ?? "").trim();
+  if (!chave) return null;
+  const coluna = /^\d+$/.test(chave) ? "customer_number" : "id";
+  const res = await (0, import_database.query)(
+    `SELECT id, customer_number
+         FROM clientes
+         WHERE ${coluna} = $1
+           ${filtroVendedor ? "AND vendedor_id = $2" : ""}
          LIMIT 1`,
-    filtroVendedor ? [customerNumber, filtroVendedor] : [customerNumber]
+    filtroVendedor ? [chave, filtroVendedor] : [chave]
   );
-  return scoped.rows.length > 0;
+  return res.rows[0] || null;
 }
 router.post("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req, res) => {
   try {
@@ -63,22 +67,27 @@ router.post("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req
     if (!payload.customer_name?.toString().trim()) {
       return res.status(400).json({ erro: "customer_name \xE9 obrigat\xF3rio." });
     }
-    const customerNumber = Number(payload.customer_number);
-    if (!Number.isInteger(customerNumber) || customerNumber <= 0) {
-      return res.status(400).json({ erro: "customer_number \xE9 obrigat\xF3rio e deve ser num\xE9rico." });
+    if (payload.customer_number === void 0 || payload.customer_number === null || payload.customer_number === "") {
+      payload.customer_number = null;
+    } else {
+      const customerNumber = Number(payload.customer_number);
+      if (!Number.isInteger(customerNumber) || customerNumber <= 0) {
+        return res.status(400).json({ erro: "customer_number deve ser um n\xFAmero inteiro positivo." });
+      }
+      payload.customer_number = customerNumber;
     }
-    payload.customer_number = customerNumber;
     if (!payload.status) payload.status = "C";
     if (req.filtroVendedor) payload.vendedor_id = req.filtroVendedor;
-    const fields = Object.keys(payload);
-    const values = Object.values(payload);
+    const clienteId = (0, import_crypto.randomUUID)();
+    const fields = ["id", ...Object.keys(payload)];
+    const values = [clienteId, ...Object.values(payload)];
     const placeholders = fields.map((_, i) => `$${i + 1}`);
     await (0, import_database.query)(
       `INSERT INTO clientes (${fields.join(", ")})
              VALUES (${placeholders.join(", ")})`,
       values
     );
-    const created = await (0, import_database.query)("SELECT * FROM clientes WHERE customer_number = $1", [customerNumber]);
+    const created = await (0, import_database.query)("SELECT * FROM clientes WHERE id = $1", [clienteId]);
     res.status(201).json(created.rows[0]);
   } catch (err) {
     console.error("[clientes/create]", err);
@@ -101,9 +110,10 @@ router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req,
       mes,
       ano
     } = req.query;
+    const isExport = String(req.query.export ?? "") === "true";
     const pageNum = Math.max(Number(page) || 1, 1);
-    const limitNum = Math.min(Math.max(Number(limit) || 50, 1), 500);
-    const offset = (pageNum - 1) * limitNum;
+    const limitNum = isExport ? 5e4 : Math.min(Math.max(Number(limit) || 50, 1), 500);
+    const offset = isExport ? 0 : (pageNum - 1) * limitNum;
     const periodoInformado = mes !== void 0 && mes !== "" && ano !== void 0 && ano !== "";
     const mesNum = periodoInformado ? Number(mes) : null;
     const anoNum = periodoInformado ? Number(ano) : null;
@@ -177,6 +187,7 @@ router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req,
       (0, import_database.query)(`SELECT COUNT(*) AS count FROM ${tabela} c ${whereClause}`, params),
       (0, import_database.query)(`
                 SELECT
+                    ${usarHistorico ? "NULL AS id" : "c.id"},
                     c.customer_number, c.customer_name, c.cnpj, c.city,
                     c.canal_cliente, c.segmentacao_cliente, c.nova_rup, c.status,
                     c.tem_contrato, c.qtd_conservadora, c.hierarquia,
@@ -251,8 +262,10 @@ router.get("/exportar/csv", import_auth.authMiddleware, import_auth.ownDataOnly,
 });
 router.get("/:id", import_auth.authMiddleware, import_auth.ownDataOnly, async (req, res) => {
   try {
-    const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ erro: "ID inv\xE1lido." });
+    const alvo = await resolverCliente(req.params.id, req.filtroVendedor);
+    if (!alvo) return res.status(404).json({ erro: "Cliente n\xE3o encontrado." });
+    const sold = alvo.customer_number;
+    const vazio = { rows: [] };
     const [cliente, vendas, ruptura, pedidos, historicoCadastral] = await Promise.all([
       (0, import_database.query)(`
                 SELECT c.*, v.nome AS vendedor_nome, v.setor, v.codigo_vendedor,
@@ -260,9 +273,9 @@ router.get("/:id", import_auth.authMiddleware, import_auth.ownDataOnly, async (r
                 FROM clientes c
                 LEFT JOIN vendedores v ON v.id = c.vendedor_id
                 LEFT JOIN roteirizacao rot ON rot.customer_number = c.customer_number AND rot.ativa = TRUE
-                WHERE c.customer_number = $1
-            `, [id]),
-      (0, import_database.query)(`
+                WHERE c.id = $1
+            `, [alvo.id]),
+      sold === null ? vazio : (0, import_database.query)(`
                 SELECT mes_descricao, mes_numero, ano,
                        SUM(valor_nf) AS valor, SUM(soma_caixas) AS caixas,
                        SUM(soma_litros) AS litros, COUNT(*) AS itens
@@ -270,23 +283,23 @@ router.get("/:id", import_auth.authMiddleware, import_auth.ownDataOnly, async (r
                 GROUP BY mes_descricao, mes_numero, ano
                 ORDER BY ano DESC, mes_numero DESC
                 LIMIT 12
-            `, [id]),
-      (0, import_database.query)(`
+            `, [sold]),
+      sold === null ? vazio : (0, import_database.query)(`
                 SELECT * FROM ruptura
                 WHERE customer_number = $1
                 ORDER BY ano DESC, mes_numero DESC
                 LIMIT 6
-            `, [id]),
-      (0, import_database.query)(`
+            `, [sold]),
+      sold === null ? vazio : (0, import_database.query)(`
                 SELECT * FROM pedidos_carteira
                 WHERE customer_number = $1
                 ORDER BY order_date DESC
                 LIMIT 20
-            `, [id]),
+            `, [sold]),
       // Snapshot mensal do cadastro — como o cliente estava em cada mês
       // (status, nova_rup, tem_contrato etc.), diferente do estado atual
       // acima (cliente.rows[0]), que só reflete a última importação.
-      (0, import_database.query)(`
+      sold === null ? vazio : (0, import_database.query)(`
                 SELECT mes_referencia, mes_numero, ano, status, nova_rup, tem_contrato,
                        qtd_conservadora, segmentacao_cliente, canal_cliente, hierarquia,
                        filial, vendedor_id
@@ -294,7 +307,7 @@ router.get("/:id", import_auth.authMiddleware, import_auth.ownDataOnly, async (r
                 WHERE customer_number = $1
                 ORDER BY ano DESC, mes_numero DESC
                 LIMIT 12
-            `, [id])
+            `, [sold])
     ]);
     if (cliente.rows.length === 0) {
       return res.status(404).json({ erro: "Cliente n\xE3o encontrado." });
@@ -307,35 +320,29 @@ router.get("/:id", import_auth.authMiddleware, import_auth.ownDataOnly, async (r
       pedidos_carteira: pedidos.rows
     });
   } catch (err) {
+    console.error("[clientes/detalhe]", err);
     res.status(500).json({ erro: "Erro ao buscar cliente." });
   }
 });
 router.put("/:id/observacao", import_auth.authMiddleware, import_auth.ownDataOnly, async (req, res) => {
   try {
-    const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ erro: "ID inv\xE1lido." });
-    const allowed = await existsClienteForScope(id, req.filtroVendedor);
-    if (!allowed) {
-      return res.status(404).json({ erro: "Cliente n\xE3o encontrado." });
-    }
+    const alvo = await resolverCliente(req.params.id, req.filtroVendedor);
+    if (!alvo) return res.status(404).json({ erro: "Cliente n\xE3o encontrado." });
     const { observacao } = req.body;
     await (0, import_database.query)(
-      "UPDATE clientes SET observacao = $1, updated_at = NOW() WHERE customer_number = $2",
-      [observacao ?? null, id]
+      "UPDATE clientes SET observacao = $1, updated_at = NOW() WHERE id = $2",
+      [observacao ?? null, alvo.id]
     );
     res.json({ mensagem: "Observa\xE7\xE3o salva." });
   } catch (err) {
+    console.error("[clientes/observacao]", err);
     res.status(500).json({ erro: "Erro ao salvar observa\xE7\xE3o." });
   }
 });
 router.put("/:id", import_auth.authMiddleware, import_auth.ownDataOnly, async (req, res) => {
   try {
-    const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ erro: "ID inv\xE1lido." });
-    const allowed = await existsClienteForScope(id, req.filtroVendedor);
-    if (!allowed) {
-      return res.status(404).json({ erro: "Cliente n\xE3o encontrado." });
-    }
+    const alvo = await resolverCliente(req.params.id, req.filtroVendedor);
+    if (!alvo) return res.status(404).json({ erro: "Cliente n\xE3o encontrado." });
     const payload = pickClienteFields(req.body || {});
     delete payload.customer_number;
     if (req.filtroVendedor) payload.vendedor_id = req.filtroVendedor;
@@ -344,14 +351,14 @@ router.put("/:id", import_auth.authMiddleware, import_auth.ownDataOnly, async (r
       return res.status(400).json({ erro: "Nenhum campo v\xE1lido para atualizar." });
     }
     const setClause = fields.map((field, i) => `${field} = $${i + 1}`).join(", ");
-    const values = [...fields.map((field) => payload[field]), id];
+    const values = [...fields.map((field) => payload[field]), alvo.id];
     await (0, import_database.query)(
       `UPDATE clientes
              SET ${setClause}, updated_at = NOW()
-             WHERE customer_number = $${values.length}`,
+             WHERE id = $${values.length}`,
       values
     );
-    const updated = await (0, import_database.query)("SELECT * FROM clientes WHERE customer_number = $1", [id]);
+    const updated = await (0, import_database.query)("SELECT * FROM clientes WHERE id = $1", [alvo.id]);
     res.json(updated.rows[0]);
   } catch (err) {
     console.error("[clientes/update]", err);
@@ -360,15 +367,11 @@ router.put("/:id", import_auth.authMiddleware, import_auth.ownDataOnly, async (r
 });
 router.delete("/:id", import_auth.authMiddleware, import_auth.ownDataOnly, async (req, res) => {
   try {
-    const id = Number(req.params.id);
-    if (!Number.isFinite(id)) return res.status(400).json({ erro: "ID inv\xE1lido." });
-    const allowed = await existsClienteForScope(id, req.filtroVendedor);
-    if (!allowed) {
-      return res.status(404).json({ erro: "Cliente n\xE3o encontrado." });
-    }
+    const alvo = await resolverCliente(req.params.id, req.filtroVendedor);
+    if (!alvo) return res.status(404).json({ erro: "Cliente n\xE3o encontrado." });
     await (0, import_database.query)(
-      "UPDATE clientes SET status = $1, updated_at = NOW() WHERE customer_number = $2",
-      ["I", id]
+      "UPDATE clientes SET status = $1, updated_at = NOW() WHERE id = $2",
+      ["I", alvo.id]
     );
     res.status(204).send();
   } catch (err) {

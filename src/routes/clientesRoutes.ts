@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { randomUUID } from 'crypto';
 import { query } from '../config/database';
 import { authMiddleware, ownDataOnly } from '../middleware/auth';
 import { hasSnapshotForPeriodo } from '../services/clientesHistoricoService';
@@ -31,16 +32,28 @@ function pickClienteFields(body: any): Record<string, any> {
     return data;
 }
 
-async function existsClienteForScope(customerNumber: number, filtroVendedor?: number | string): Promise<boolean> {
-    const scoped = await query(
-        `SELECT 1
-         FROM clientes c
-         WHERE c.customer_number = $1
-           ${filtroVendedor ? 'AND c.vendedor_id = $2' : ''}
+// O :id das rotas de detalhe/edição aceita o customer_number (SOLD) OU o uuid
+// de clientes.id. Cliente criado pela conclusão de uma solicitação de cadastro
+// nasce sem SOLD — a Froneri é quem o emite, e ele só chega na importação —, e
+// nesse intervalo o uuid é a única chave que ele tem.
+async function resolverCliente(
+    param: string,
+    filtroVendedor?: number | string,
+): Promise<{ id: string; customer_number: number | null } | null> {
+    const chave = String(param ?? '').trim();
+    if (!chave) return null;
+    // Coluna vem de whitelist — nunca da entrada do usuário.
+    const coluna = /^\d+$/.test(chave) ? 'customer_number' : 'id';
+
+    const res = await query(
+        `SELECT id, customer_number
+         FROM clientes
+         WHERE ${coluna} = $1
+           ${filtroVendedor ? 'AND vendedor_id = $2' : ''}
          LIMIT 1`,
-        filtroVendedor ? [customerNumber, filtroVendedor] : [customerNumber]
+        filtroVendedor ? [chave, filtroVendedor] : [chave]
     );
-    return scoped.rows.length > 0;
+    return res.rows[0] || null;
 }
 
 // POST /api/clientes
@@ -51,19 +64,27 @@ router.post('/', authMiddleware, ownDataOnly, async (req, res) => {
             return res.status(400).json({ erro: 'customer_name é obrigatório.' });
         }
 
-        // clientes é chaveada pelo customer_number do ERP (sem AUTO_INCREMENT):
-        // sem ele o INSERT não tem chave e o insertId do driver seria 0.
-        const customerNumber = Number(payload.customer_number);
-        if (!Number.isInteger(customerNumber) || customerNumber <= 0) {
-            return res.status(400).json({ erro: 'customer_number é obrigatório e deve ser numérico.' });
+        // customer_number é opcional: o SOLD vem da planilha da Froneri. Quando
+        // informado precisa ser inteiro positivo; quando não, o cliente nasce
+        // pendente e a importação preenche o número casando pelo CNPJ.
+        if (payload.customer_number === undefined || payload.customer_number === null || payload.customer_number === '') {
+            payload.customer_number = null;
+        } else {
+            const customerNumber = Number(payload.customer_number);
+            if (!Number.isInteger(customerNumber) || customerNumber <= 0) {
+                return res.status(400).json({ erro: 'customer_number deve ser um número inteiro positivo.' });
+            }
+            payload.customer_number = customerNumber;
         }
-        payload.customer_number = customerNumber;
 
         if (!payload.status) payload.status = 'C';
         if (req.filtroVendedor) payload.vendedor_id = req.filtroVendedor;
 
-        const fields = Object.keys(payload);
-        const values = Object.values(payload);
+        // id explícito: sem customer_number não há como reler a linha recém
+        // inserida (a PK é uuid gerado por DEFAULT, que o driver não devolve).
+        const clienteId = randomUUID();
+        const fields = ['id', ...Object.keys(payload)];
+        const values = [clienteId, ...Object.values(payload)];
         const placeholders = fields.map((_, i) => `$${i + 1}`);
 
         await query(
@@ -72,7 +93,7 @@ router.post('/', authMiddleware, ownDataOnly, async (req, res) => {
             values
         );
 
-        const created = await query('SELECT * FROM clientes WHERE customer_number = $1', [customerNumber]);
+        const created = await query('SELECT * FROM clientes WHERE id = $1', [clienteId]);
 
         res.status(201).json(created.rows[0]);
     } catch (err) {
@@ -97,10 +118,17 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
             mes, ano,
         } = req.query;
 
+        // export=true: mesmo contrato do /vendas — o cache do front carrega a
+        // base inteira de uma vez e filtra localmente. Sem a flag o teto de 500
+        // corta a lista no meio do ORDER BY customer_name, e cliente com nome no
+        // fim do alfabeto (ex.: recém-criado pela conclusão de um cadastro)
+        // nunca chega na tela.
+        const isExport = String(req.query.export ?? '') === 'true';
+
         // page/limit vêm da query string — NaN aqui viraria `LIMIT NaN` no SQL.
         const pageNum  = Math.max(Number(page) || 1, 1);
-        const limitNum = Math.min(Math.max(Number(limit) || 50, 1), 500);
-        const offset   = (pageNum - 1) * limitNum;
+        const limitNum = isExport ? 50000 : Math.min(Math.max(Number(limit) || 50, 1), 500);
+        const offset   = isExport ? 0 : (pageNum - 1) * limitNum;
 
         const periodoInformado = mes !== undefined && mes !== '' && ano !== undefined && ano !== '';
         const mesNum = periodoInformado ? Number(mes) : null;
@@ -181,6 +209,7 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
             query(`SELECT COUNT(*) AS count FROM ${tabela} c ${whereClause}`, params),
             query(`
                 SELECT
+                    ${usarHistorico ? 'NULL AS id' : 'c.id'},
                     c.customer_number, c.customer_name, c.cnpj, c.city,
                     c.canal_cliente, c.segmentacao_cliente, c.nova_rup, c.status,
                     c.tem_contrato, c.qtd_conservadora, c.hierarquia,
@@ -260,11 +289,17 @@ router.get('/exportar/csv', authMiddleware, ownDataOnly, async (req, res) => {
     }
 });
 
-// GET /api/clientes/:customerNumber  — detalhe completo
+// GET /api/clientes/:id  — detalhe completo (:id = SOLD ou uuid, ver resolverCliente)
 router.get('/:id', authMiddleware, ownDataOnly, async (req, res) => {
     try {
-        const id = Number(req.params.id);
-        if (!Number.isFinite(id)) return res.status(400).json({ erro: 'ID inválido.' });
+        const alvo = await resolverCliente(req.params.id, req.filtroVendedor);
+        if (!alvo) return res.status(404).json({ erro: 'Cliente não encontrado.' });
+
+        // Todo o histórico é chaveado por customer_number. Cliente ainda sem
+        // SOLD não tem venda, ruptura, carteira nem snapshot — devolve vazio em
+        // vez de rodar cinco queries com parâmetro nulo.
+        const sold = alvo.customer_number;
+        const vazio = { rows: [] as any[] };
 
         const [cliente, vendas, ruptura, pedidos, historicoCadastral] = await Promise.all([
             query(`
@@ -273,10 +308,10 @@ router.get('/:id', authMiddleware, ownDataOnly, async (req, res) => {
                 FROM clientes c
                 LEFT JOIN vendedores v ON v.id = c.vendedor_id
                 LEFT JOIN roteirizacao rot ON rot.customer_number = c.customer_number AND rot.ativa = TRUE
-                WHERE c.customer_number = $1
-            `, [id]),
+                WHERE c.id = $1
+            `, [alvo.id]),
 
-            query(`
+            sold === null ? vazio : query(`
                 SELECT mes_descricao, mes_numero, ano,
                        SUM(valor_nf) AS valor, SUM(soma_caixas) AS caixas,
                        SUM(soma_litros) AS litros, COUNT(*) AS itens
@@ -284,26 +319,26 @@ router.get('/:id', authMiddleware, ownDataOnly, async (req, res) => {
                 GROUP BY mes_descricao, mes_numero, ano
                 ORDER BY ano DESC, mes_numero DESC
                 LIMIT 12
-            `, [id]),
+            `, [sold]),
 
-            query(`
+            sold === null ? vazio : query(`
                 SELECT * FROM ruptura
                 WHERE customer_number = $1
                 ORDER BY ano DESC, mes_numero DESC
                 LIMIT 6
-            `, [id]),
+            `, [sold]),
 
-            query(`
+            sold === null ? vazio : query(`
                 SELECT * FROM pedidos_carteira
                 WHERE customer_number = $1
                 ORDER BY order_date DESC
                 LIMIT 20
-            `, [id]),
+            `, [sold]),
 
             // Snapshot mensal do cadastro — como o cliente estava em cada mês
             // (status, nova_rup, tem_contrato etc.), diferente do estado atual
             // acima (cliente.rows[0]), que só reflete a última importação.
-            query(`
+            sold === null ? vazio : query(`
                 SELECT mes_referencia, mes_numero, ano, status, nova_rup, tem_contrato,
                        qtd_conservadora, segmentacao_cliente, canal_cliente, hierarquia,
                        filial, vendedor_id
@@ -311,7 +346,7 @@ router.get('/:id', authMiddleware, ownDataOnly, async (req, res) => {
                 WHERE customer_number = $1
                 ORDER BY ano DESC, mes_numero DESC
                 LIMIT 12
-            `, [id]),
+            `, [sold]),
         ]);
 
         if (cliente.rows.length === 0) {
@@ -326,6 +361,7 @@ router.get('/:id', authMiddleware, ownDataOnly, async (req, res) => {
             pedidos_carteira:     pedidos.rows,
         });
     } catch (err) {
+        console.error('[clientes/detalhe]', err);
         res.status(500).json({ erro: 'Erro ao buscar cliente.' });
     }
 });
@@ -333,21 +369,17 @@ router.get('/:id', authMiddleware, ownDataOnly, async (req, res) => {
 // PUT /api/clientes/:id/observacao  — atualizar observações manualmente
 router.put('/:id/observacao', authMiddleware, ownDataOnly, async (req, res) => {
     try {
-        const id = Number(req.params.id);
-        if (!Number.isFinite(id)) return res.status(400).json({ erro: 'ID inválido.' });
-
-        const allowed = await existsClienteForScope(id, req.filtroVendedor);
-        if (!allowed) {
-            return res.status(404).json({ erro: 'Cliente não encontrado.' });
-        }
+        const alvo = await resolverCliente(req.params.id, req.filtroVendedor);
+        if (!alvo) return res.status(404).json({ erro: 'Cliente não encontrado.' });
 
         const { observacao } = req.body;
         await query(
-            'UPDATE clientes SET observacao = $1, updated_at = NOW() WHERE customer_number = $2',
-            [observacao ?? null, id]
+            'UPDATE clientes SET observacao = $1, updated_at = NOW() WHERE id = $2',
+            [observacao ?? null, alvo.id]
         );
         res.json({ mensagem: 'Observação salva.' });
     } catch (err) {
+        console.error('[clientes/observacao]', err);
         res.status(500).json({ erro: 'Erro ao salvar observação.' });
     }
 });
@@ -355,15 +387,11 @@ router.put('/:id/observacao', authMiddleware, ownDataOnly, async (req, res) => {
 // PUT /api/clientes/:id
 router.put('/:id', authMiddleware, ownDataOnly, async (req, res) => {
     try {
-        const id = Number(req.params.id);
-        if (!Number.isFinite(id)) return res.status(400).json({ erro: 'ID inválido.' });
-
-        const allowed = await existsClienteForScope(id, req.filtroVendedor);
-        if (!allowed) {
-            return res.status(404).json({ erro: 'Cliente não encontrado.' });
-        }
+        const alvo = await resolverCliente(req.params.id, req.filtroVendedor);
+        if (!alvo) return res.status(404).json({ erro: 'Cliente não encontrado.' });
 
         const payload = pickClienteFields(req.body || {});
+        // O SOLD é da Froneri: chega pela importação, não por edição manual.
         delete payload.customer_number;
         if (req.filtroVendedor) payload.vendedor_id = req.filtroVendedor;
 
@@ -373,16 +401,16 @@ router.put('/:id', authMiddleware, ownDataOnly, async (req, res) => {
         }
 
         const setClause = fields.map((field, i) => `${field} = $${i + 1}`).join(', ');
-        const values = [...fields.map((field) => payload[field]), id];
+        const values = [...fields.map((field) => payload[field]), alvo.id];
 
         await query(
             `UPDATE clientes
              SET ${setClause}, updated_at = NOW()
-             WHERE customer_number = $${values.length}`,
+             WHERE id = $${values.length}`,
             values
         );
 
-        const updated = await query('SELECT * FROM clientes WHERE customer_number = $1', [id]);
+        const updated = await query('SELECT * FROM clientes WHERE id = $1', [alvo.id]);
 
         res.json(updated.rows[0]);
     } catch (err) {
@@ -394,18 +422,13 @@ router.put('/:id', authMiddleware, ownDataOnly, async (req, res) => {
 // DELETE /api/clientes/:id
 router.delete('/:id', authMiddleware, ownDataOnly, async (req, res) => {
     try {
-        const id = Number(req.params.id);
-        if (!Number.isFinite(id)) return res.status(400).json({ erro: 'ID inválido.' });
-
-        const allowed = await existsClienteForScope(id, req.filtroVendedor);
-        if (!allowed) {
-            return res.status(404).json({ erro: 'Cliente não encontrado.' });
-        }
+        const alvo = await resolverCliente(req.params.id, req.filtroVendedor);
+        if (!alvo) return res.status(404).json({ erro: 'Cliente não encontrado.' });
 
         // Exclusão lógica para preservar histórico e relacionamentos.
         await query(
-            'UPDATE clientes SET status = $1, updated_at = NOW() WHERE customer_number = $2',
-            ['I', id]
+            'UPDATE clientes SET status = $1, updated_at = NOW() WHERE id = $2',
+            ['I', alvo.id]
         );
 
         res.status(204).send();

@@ -25,6 +25,20 @@ var import_database = require("../config/database");
 var import_auth = require("../middleware/auth");
 const router = (0, import_express.Router)();
 const MES_ABREV = ["Jan", "Fev", "Mar", "Abr", "Mai", "Jun", "Jul", "Ago", "Set", "Out", "Nov", "Dez"];
+const MES_NOME = [
+  "Janeiro",
+  "Fevereiro",
+  "Mar\xE7o",
+  "Abril",
+  "Maio",
+  "Junho",
+  "Julho",
+  "Agosto",
+  "Setembro",
+  "Outubro",
+  "Novembro",
+  "Dezembro"
+];
 const EVOLUTION_MONTHS = 6;
 function lastMonths(mes, ano, count) {
   const out = [];
@@ -596,6 +610,301 @@ router.get("/comparativo-anual", import_auth.authMiddleware, import_auth.ownData
   } catch (err) {
     console.error("[vendas/comparativo-anual]", err);
     res.status(500).json({ erro: "Erro ao carregar comparativo anual de vendas." });
+  }
+});
+const RELATORIO_MAX_TRANSACOES = 1e5;
+router.get("/relatorio", import_auth.authMiddleware, import_auth.ownDataOnly, async (req, res) => {
+  try {
+    const ano = Number(req.query.ano);
+    const mesIniRaw = Number(req.query.mes_inicio);
+    const mesFimRaw = Number(req.query.mes_fim);
+    const mesesOk = [mesIniRaw, mesFimRaw].every((m) => Number.isInteger(m) && m >= 1 && m <= 12);
+    if (!Number.isInteger(ano) || ano < 1900 || ano > 3e3 || !mesesOk) {
+      return res.status(400).json({ erro: "Par\xE2metros ano/mes_inicio/mes_fim inv\xE1lidos." });
+    }
+    const mesInicio = Math.min(mesIniRaw, mesFimRaw);
+    const mesFim = Math.max(mesIniRaw, mesFimRaw);
+    const canal = req.query.canal ? String(req.query.canal) : null;
+    const segmentacao = req.query.segmentacao ? String(req.query.segmentacao) : null;
+    const buscaRaw = req.query.busca ? String(req.query.busca).trim() : "";
+    const busca = buscaRaw ? buscaRaw.replace(/[\\%_]/g, "\\$&") : null;
+    const agrupar = String(req.query.agrupar ?? "categoria") === "vendedor" ? "vendedor" : "categoria";
+    const topN = Math.min(Math.max(Number(req.query.top_n) || 10, 1), 50);
+    const fvId = req.filtroVendedor ?? null;
+    const grupoExpr = agrupar === "vendedor" ? `TRIM(REPLACE(COALESCE(v.nome, 'Sem vendedor'), '_Logica MG', ''))` : `COALESCE(NULLIF(TRIM(ve.categoria), ''), 'Sem categoria')`;
+    const baseWhere = `
+      WHERE ve.ano = ?
+        AND ve.mes_numero BETWEEN ? AND ?
+        AND (? IS NULL OR ve.vendedor_id         = ?)
+        AND (? IS NULL OR ve.canal_cliente       = ?)
+        AND (? IS NULL OR ve.segmentacao_cliente = ?)
+        AND (? IS NULL OR (
+              ve.customer_name                 LIKE CONCAT('%', ?, '%')
+           OR CAST(ve.customer_number AS CHAR) LIKE CONCAT('%', ?, '%')
+           OR v.nome                           LIKE CONCAT('%', ?, '%')
+           OR ve.descricao_produto             LIKE CONCAT('%', ?, '%')
+        ))
+    `;
+    const baseParams = [
+      ano,
+      mesInicio,
+      mesFim,
+      fvId,
+      fvId,
+      canal,
+      canal,
+      segmentacao,
+      segmentacao,
+      busca,
+      busca,
+      busca,
+      busca,
+      busca
+    ];
+    const [kpisQ, devQ, resumoQ, clientesQ, mensalQ, rupturaQ, transTotalQ, transQ] = await Promise.all([
+      // ── BRUTO — só VENDA ────────────────────────────────────────────────
+      (0, import_database.query)(`
+        SELECT
+          COALESCE(SUM(ve.valor_nf), 0)      AS faturamento_bruto,
+          COALESCE(SUM(ve.soma_caixas), 0)   AS caixas_brutas,
+          COALESCE(SUM(ve.soma_litros), 0)   AS litros_brutos,
+          COUNT(DISTINCT ve.customer_number) AS clientes,
+          COUNT(*)                           AS transacoes
+        FROM vw_vendas_validas ve
+        LEFT JOIN vendedores v ON v.id = ve.vendedor_id
+        ${baseWhere}
+      `, baseParams),
+      // ── DEVOLUÇÕES — magnitude positiva ─────────────────────────────────
+      (0, import_database.query)(`
+        SELECT
+          COALESCE(SUM(ve.valor_nf), 0)      AS devolucoes_valor,
+          COALESCE(SUM(ve.soma_caixas), 0)   AS devolucoes_caixas,
+          COALESCE(SUM(ve.soma_litros), 0)   AS devolucoes_litros,
+          COUNT(*)                           AS devolucoes_transacoes,
+          COUNT(DISTINCT ve.customer_number) AS clientes_com_devolucao
+        FROM vw_vendas_devolucao ve
+        LEFT JOIN vendedores v ON v.id = ve.vendedor_id
+        ${baseWhere}
+      `, baseParams),
+      // ── Resumo LÍQUIDO por grupo (geral + Take Home/Impulso) ────────────
+      (0, import_database.query)(`
+        SELECT '__GERAL__' AS tipo, ${grupoExpr} AS grupo,
+               COALESCE(SUM(ve.valor_nf), 0)    AS valor_nf,
+               COALESCE(SUM(ve.soma_caixas), 0) AS caixas,
+               COALESCE(SUM(ve.soma_litros), 0) AS litros,
+               COUNT(DISTINCT CASE WHEN ve.origem_linha = 'VENDA'
+                                   THEN ve.customer_number END) AS clientes
+        FROM vw_vendas_liquidas ve
+        LEFT JOIN vendedores v ON v.id = ve.vendedor_id
+        ${baseWhere}
+        GROUP BY grupo
+
+        UNION ALL
+
+        SELECT UPPER(TRIM(ve.categoria_total_sku)) AS tipo, ${grupoExpr} AS grupo,
+               COALESCE(SUM(ve.valor_nf), 0),
+               COALESCE(SUM(ve.soma_caixas), 0),
+               COALESCE(SUM(ve.soma_litros), 0),
+               COUNT(DISTINCT CASE WHEN ve.origem_linha = 'VENDA'
+                                   THEN ve.customer_number END)
+        FROM vw_vendas_liquidas ve
+        LEFT JOIN vendedores v ON v.id = ve.vendedor_id
+        ${baseWhere}
+          AND TRIM(COALESCE(ve.categoria_total_sku, '')) <> ''
+        GROUP BY tipo, grupo
+
+        ORDER BY valor_nf DESC
+      `, [...baseParams, ...baseParams]),
+      // ── Ranking de clientes LÍQUIDO do intervalo ────────────────────────
+      (0, import_database.query)(`
+        SELECT ve.customer_number AS sold,
+               MAX(CASE WHEN ve.origem_linha = 'VENDA'
+                        THEN ve.customer_name END)   AS nome,
+               COALESCE(SUM(ve.valor_nf), 0)         AS valor,
+               COALESCE(SUM(CASE WHEN ve.origem_linha = 'VENDA'
+                                 THEN ve.valor_nf ELSE 0 END), 0) AS valor_bruto,
+               COALESCE(SUM(CASE WHEN ve.origem_linha = 'DEVOLUCAO'
+                                 THEN ABS(ve.valor_nf) ELSE 0 END), 0) AS valor_devolucoes
+        FROM vw_vendas_liquidas ve
+        LEFT JOIN vendedores v ON v.id = ve.vendedor_id
+        ${baseWhere}
+        GROUP BY ve.customer_number
+        HAVING valor <> 0
+        ORDER BY valor DESC
+      `, baseParams),
+      // ── Evolução mês a mês do intervalo (líquido + tipos numa query só) ─
+      (0, import_database.query)(`
+        SELECT ve.mes_numero,
+               COALESCE(SUM(ve.valor_nf), 0) AS valor,
+               COALESCE(SUM(CASE WHEN ve.origem_linha = 'VENDA'
+                                 THEN ve.valor_nf ELSE 0 END), 0) AS valor_bruto,
+               COALESCE(SUM(CASE WHEN ve.origem_linha = 'DEVOLUCAO'
+                                 THEN ABS(ve.valor_nf) ELSE 0 END), 0) AS valor_devolucoes,
+               COALESCE(SUM(ve.soma_caixas), 0) AS caixas,
+               COUNT(DISTINCT CASE WHEN ve.origem_linha = 'VENDA'
+                                   THEN ve.customer_number END) AS clientes,
+               COALESCE(SUM(CASE WHEN UPPER(TRIM(ve.categoria_total_sku)) = 'TAKE HOME'
+                                 THEN ve.valor_nf ELSE 0 END), 0) AS take_home,
+               COALESCE(SUM(CASE WHEN UPPER(TRIM(ve.categoria_total_sku)) = 'IMPULSO'
+                                 THEN ve.valor_nf ELSE 0 END), 0) AS impulso
+        FROM vw_vendas_liquidas ve
+        LEFT JOIN vendedores v ON v.id = ve.vendedor_id
+        ${baseWhere}
+        GROUP BY ve.mes_numero
+        ORDER BY ve.mes_numero
+      `, baseParams),
+      // ── Ruptura por mês do intervalo ────────────────────────────────────
+      (0, import_database.query)(`
+        SELECT ra.mes_numero,
+               SUM(ra.eh_ruptura) AS rupturas,
+               SUM(ra.entra_base) AS base
+        FROM vw_ruptura_avaliada ra
+        WHERE ra.ano = ?
+          AND ra.mes_numero BETWEEN ? AND ?
+          AND (? IS NULL OR ra.vendedor_id         = ?)
+          AND (? IS NULL OR ra.canal_cliente       = ?)
+          AND (? IS NULL OR ra.segmentacao_cliente = ?)
+          AND (? IS NULL OR (
+                ra.customer_name                 LIKE CONCAT('%', ?, '%')
+             OR CAST(ra.customer_number AS CHAR) LIKE CONCAT('%', ?, '%')
+             OR ra.vendedor_nome                 LIKE CONCAT('%', ?, '%')
+          ))
+        GROUP BY ra.mes_numero
+      `, [
+        ano,
+        mesInicio,
+        mesFim,
+        fvId,
+        fvId,
+        canal,
+        canal,
+        segmentacao,
+        segmentacao,
+        busca,
+        busca,
+        busca,
+        busca
+      ]),
+      // ── Total de transações do filtro (para sinalizar truncamento) ──────
+      (0, import_database.query)(`
+        SELECT COUNT(*) AS count
+        FROM vw_vendas_liquidas ve
+        LEFT JOIN vendedores v ON v.id = ve.vendedor_id
+        ${baseWhere}
+      `, baseParams),
+      // ── Transações do intervalo (valor_nf já com sinal correto) ─────────
+      (0, import_database.query)(`
+        SELECT
+          ve.customer_number, ve.customer_name, ve.numero_nf, ve.data_faturamento,
+          ve.descricao_produto, ve.categoria, ve.subcategoria, ve.categoria_total_sku,
+          ve.soma_caixas, ve.soma_litros, ve.valor_nf, ve.status_venda,
+          ve.origem_linha, ve.canal_cliente, ve.segmentacao_cliente, ve.city,
+          v.nome AS vendedor_nome
+        FROM vw_vendas_liquidas ve
+        LEFT JOIN vendedores v ON v.id = ve.vendedor_id
+        ${baseWhere}
+        ORDER BY ve.data_faturamento DESC, ve.customer_number, ve.numero_nf
+        LIMIT ?
+      `, [...baseParams, RELATORIO_MAX_TRANSACOES])
+    ]);
+    const k = kpisQ.rows[0] ?? {};
+    const d = devQ.rows[0] ?? {};
+    const faturamentoBruto = num(k.faturamento_bruto);
+    const caixasBrutas = num(k.caixas_brutas);
+    const litrosBrutos = num(k.litros_brutos);
+    const clientes = num(k.clientes);
+    const devolucoesValor = num(d.devolucoes_valor);
+    const devolucoesCaixas = num(d.devolucoes_caixas);
+    const devolucoesLitros = num(d.devolucoes_litros);
+    const faturamento = faturamentoBruto - devolucoesValor;
+    const caixas = caixasBrutas - devolucoesCaixas;
+    const litros = litrosBrutos - devolucoesLitros;
+    const linhas = resumoQ.rows.map((r) => ({
+      tipo: String(r.tipo ?? ""),
+      grupo: String(r.grupo ?? ""),
+      valor_nf: num(r.valor_nf),
+      caixas: num(r.caixas),
+      litros: num(r.litros),
+      clientes: num(r.clientes)
+    }));
+    const porTipo = (t) => linhas.filter((l) => l.tipo === t).map(({ tipo: _t, ...rest }) => rest);
+    const rankingClientes = clientesQ.rows.map((c) => ({
+      sold: c.sold,
+      nome: String(c.nome ?? "\u2014"),
+      valor: num(c.valor),
+      valor_bruto: num(c.valor_bruto),
+      valor_devolucoes: num(c.valor_devolucoes)
+    }));
+    const mensalMap = new Map(mensalQ.rows.map((r) => [num(r.mes_numero), r]));
+    const rupturaMap = new Map(rupturaQ.rows.map((r) => [num(r.mes_numero), r]));
+    const evolucao = Array.from({ length: mesFim - mesInicio + 1 }, (_, i) => {
+      const mesNumero = mesInicio + i;
+      const m = mensalMap.get(mesNumero);
+      const r = rupturaMap.get(mesNumero);
+      const base = num(r?.base);
+      return {
+        mes: mesNumero,
+        ano,
+        label: `${MES_ABREV[mesNumero - 1]}/${String(ano).slice(2)}`,
+        valor: num(m?.valor),
+        valor_bruto: num(m?.valor_bruto),
+        valor_devolucoes: num(m?.valor_devolucoes),
+        caixas: num(m?.caixas),
+        clientes: num(m?.clientes),
+        take_home: num(m?.take_home),
+        impulso: num(m?.impulso),
+        // Mês sem base avaliada (futuro / sem roster) tem ruptura INDEFINIDA.
+        ruptura_pct: base > 0 ? num(r?.rupturas) / base * 100 : null
+      };
+    });
+    const totalTransacoes = num(transTotalQ.rows[0]?.count);
+    const labelPeriodo = mesInicio === mesFim ? `${MES_NOME[mesInicio - 1]}/${ano}` : `${MES_NOME[mesInicio - 1]} a ${MES_NOME[mesFim - 1]}/${ano}`;
+    res.json({
+      periodo: {
+        ano,
+        mes_inicio: mesInicio,
+        mes_fim: mesFim,
+        label: labelPeriodo,
+        canal,
+        segmentacao,
+        busca: buscaRaw || null,
+        agrupar
+      },
+      kpis: {
+        faturamento,
+        caixas,
+        litros,
+        clientes,
+        transacoes: num(k.transacoes),
+        faturamento_bruto: faturamentoBruto,
+        caixas_brutas: caixasBrutas,
+        litros_brutos: litrosBrutos,
+        devolucoes_valor: devolucoesValor,
+        devolucoes_caixas: devolucoesCaixas,
+        devolucoes_litros: devolucoesLitros,
+        devolucoes_transacoes: num(d.devolucoes_transacoes),
+        clientes_com_devolucao: num(d.clientes_com_devolucao),
+        pct_devolucao: faturamentoBruto > 0 ? devolucoesValor / faturamentoBruto * 100 : 0,
+        ticket_medio: clientes > 0 ? faturamento / clientes : 0,
+        caixas_por_cliente: clientes > 0 ? caixas / clientes : 0
+      },
+      resumo: {
+        geral: porTipo("__GERAL__"),
+        take_home: porTipo("TAKE HOME"),
+        impulso: porTipo("IMPULSO")
+      },
+      top_clientes: rankingClientes.slice(0, topN),
+      ranking_clientes: rankingClientes,
+      evolucao,
+      transacoes: {
+        total: totalTransacoes,
+        truncado: totalTransacoes > RELATORIO_MAX_TRANSACOES,
+        dados: transQ.rows
+      }
+    });
+  } catch (err) {
+    console.error("[vendas/relatorio]", err);
+    res.status(500).json({ erro: "Erro ao gerar relat\xF3rio de vendas." });
   }
 });
 var vendasRoutes_default = router;

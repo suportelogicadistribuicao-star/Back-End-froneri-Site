@@ -27,6 +27,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 var importService_exports = {};
 __export(importService_exports, {
+  adotarClientesSemSold: () => adotarClientesSemSold,
   importarRelatorioVendas: () => importarRelatorioVendas,
   iniciarImportacaoRelatorioVendas: () => iniciarImportacaoRelatorioVendas,
   loadVendedoresMap: () => loadVendedoresMap
@@ -273,6 +274,55 @@ const HIST_COLS = [
   "vendedor_id",
   "importacao_id"
 ];
+const soDigitos = (v) => String(v ?? "").replace(/\D/g, "");
+async function adotarClientesSemSold(rows) {
+  const pendentesRes = await (0, import_database.query)(
+    "SELECT id, cnpj, customer_name FROM clientes WHERE customer_number IS NULL AND cnpj IS NOT NULL"
+  );
+  if (pendentesRes.rows.length === 0) return 0;
+  const existentesRes = await (0, import_database.query)("SELECT customer_number FROM clientes WHERE customer_number IS NOT NULL");
+  const soldsExistentes = new Set(existentesRes.rows.map((r) => Number(r.customer_number)));
+  const novosPorCnpj = /* @__PURE__ */ new Map();
+  for (const row of rows) {
+    const sold = normNum(row["Customer Number"] || row["Sold"] || row["SOLD"]);
+    const cnpj = soDigitos(row["CNPJ"]);
+    if (!sold || !cnpj || soldsExistentes.has(Number(sold))) continue;
+    if (!novosPorCnpj.has(cnpj)) novosPorCnpj.set(cnpj, /* @__PURE__ */ new Set());
+    novosPorCnpj.get(cnpj).add(Number(sold));
+  }
+  const pendentesPorCnpj = /* @__PURE__ */ new Map();
+  for (const p of pendentesRes.rows) {
+    const cnpj = soDigitos(p.cnpj);
+    if (!cnpj) continue;
+    if (!pendentesPorCnpj.has(cnpj)) pendentesPorCnpj.set(cnpj, []);
+    pendentesPorCnpj.get(cnpj).push(p);
+  }
+  let adotados = 0;
+  for (const [cnpj, pendentes] of pendentesPorCnpj) {
+    const candidatos = novosPorCnpj.get(cnpj);
+    if (!candidatos || candidatos.size === 0) continue;
+    if (pendentes.length > 1 || candidatos.size > 1) {
+      console.warn(
+        `[import/adocao] CNPJ ${cnpj} amb\xEDguo \u2014 ${pendentes.length} cliente(s) sem SOLD \xD7 ${candidatos.size} SOLD(s) novo(s) na planilha [${[...candidatos].join(", ")}]. Nenhum v\xEDnculo criado; resolva manualmente.`
+      );
+      continue;
+    }
+    const pendente = pendentes[0];
+    const sold = [...candidatos][0];
+    try {
+      await (0, import_database.withTransaction)(async (client) => {
+        await client.query("UPDATE clientes SET customer_number = $1 WHERE id = $2", [sold, pendente.id]);
+        await client.query("UPDATE cadastros SET customer_number = $1 WHERE cliente_id = $2", [sold, pendente.id]);
+      });
+      adotados++;
+      console.log(`[import/adocao] SOLD ${sold} atribu\xEDdo a "${pendente.customer_name}" (CNPJ ${cnpj})`);
+    } catch (e) {
+      console.error(`[import/adocao] Falha ao atribuir SOLD ${sold} ao cliente ${pendente.id}:`, e.message);
+    }
+  }
+  if (adotados > 0) console.log(`[import/adocao] ${adotados} cliente(s) pendente(s) receberam SOLD da planilha`);
+  return adotados;
+}
 async function processarRelatorioVendas(filePath, _usuarioId, logId, fileBuffer) {
   const vendedoresMap = await loadVendedoresMap();
   const contadores = {
@@ -309,6 +359,12 @@ async function processarRelatorioVendas(filePath, _usuarioId, logId, fileBuffer)
       linhas: { ruptura: rupturaRows.length, vendas: vendasRows.length, pedidos: pedidosRows.length },
       periodo: `${periodoRelatorio.mes}/${periodoRelatorio.ano}`
     });
+    try {
+      await adotarClientesSemSold([...rupturaRows, ...vendasRows]);
+    } catch (e) {
+      errosLog.push(`Ado\xE7\xE3o de cadastros sem SOLD: ${e.message}`);
+      console.error("[import/adocao] Falha geral:", e.message);
+    }
     if (rupturaRows.length > 0) {
       const clienteResult = await importarClientesDaBase(rupturaRows, vendedoresMap, periodoRelatorio, logId);
       contadores.clientes += clienteResult.clientesInseridos;
@@ -995,6 +1051,7 @@ async function finalizarLog(logId, status, contadores, erros, periodo) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  adotarClientesSemSold,
   importarRelatorioVendas,
   iniciarImportacaoRelatorioVendas,
   loadVendedoresMap

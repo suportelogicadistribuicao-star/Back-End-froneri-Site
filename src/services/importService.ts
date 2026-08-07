@@ -341,6 +341,84 @@ const HIST_COLS = [
     'territory_number', 'vendedor_id', 'importacao_id',
 ];
 
+// ─── Adoção de clientes criados por solicitação de cadastro ──────────────────
+// Concluir uma solicitação em `cadastros` cria o cliente SEM customer_number —
+// o SOLD é emitido pela Froneri e só chega aqui, na planilha. Antes do upsert
+// por customer_number, casamos esses pendentes pelo CNPJ e gravamos o SOLD
+// real; sem isso o upsert criaria uma SEGUNDA linha para o mesmo cliente e o
+// pendente ficaria órfão para sempre.
+//
+// CNPJ não é único em `clientes` (1727 CNPJs distintos para 2219 clientes — a
+// Froneri emite vários SOLDs por CNPJ, um por ponto de entrega). Por isso a
+// adoção é deliberadamente conservadora: só acontece quando o CNPJ tem
+// EXATAMENTE um pendente e EXATAMENTE um SOLD novo na planilha. Qualquer
+// ambiguidade é registrada no log e resolvida à mão — errar aqui significaria
+// colar o cliente do vendedor no SOLD de outra loja.
+const soDigitos = (v: unknown): string => String(v ?? '').replace(/\D/g, '');
+
+async function adotarClientesSemSold(rows: Record<string, unknown>[]): Promise<number> {
+    const pendentesRes = await query(
+        'SELECT id, cnpj, customer_name FROM clientes WHERE customer_number IS NULL AND cnpj IS NOT NULL'
+    );
+    if (pendentesRes.rows.length === 0) return 0;
+
+    const existentesRes = await query('SELECT customer_number FROM clientes WHERE customer_number IS NOT NULL');
+    const soldsExistentes = new Set<number>(existentesRes.rows.map((r: any) => Number(r.customer_number)));
+
+    // CNPJ → SOLDs novos (ainda não presentes em `clientes`) que a planilha traz.
+    const novosPorCnpj = new Map<string, Set<number>>();
+    for (const row of rows) {
+        const sold = normNum(row['Customer Number'] || row['Sold'] || row['SOLD']);
+        const cnpj = soDigitos(row['CNPJ']);
+        if (!sold || !cnpj || soldsExistentes.has(Number(sold))) continue;
+        if (!novosPorCnpj.has(cnpj)) novosPorCnpj.set(cnpj, new Set());
+        novosPorCnpj.get(cnpj)!.add(Number(sold));
+    }
+
+    // CNPJ → clientes pendentes. Dois pendentes com o mesmo CNPJ também é
+    // ambiguidade: não dá para saber qual recebe qual SOLD.
+    const pendentesPorCnpj = new Map<string, any[]>();
+    for (const p of pendentesRes.rows) {
+        const cnpj = soDigitos(p.cnpj);
+        if (!cnpj) continue;
+        if (!pendentesPorCnpj.has(cnpj)) pendentesPorCnpj.set(cnpj, []);
+        pendentesPorCnpj.get(cnpj)!.push(p);
+    }
+
+    let adotados = 0;
+    for (const [cnpj, pendentes] of pendentesPorCnpj) {
+        const candidatos = novosPorCnpj.get(cnpj);
+        if (!candidatos || candidatos.size === 0) continue;
+
+        if (pendentes.length > 1 || candidatos.size > 1) {
+            console.warn(
+                `[import/adocao] CNPJ ${cnpj} ambíguo — ${pendentes.length} cliente(s) sem SOLD × ` +
+                `${candidatos.size} SOLD(s) novo(s) na planilha [${[...candidatos].join(', ')}]. ` +
+                'Nenhum vínculo criado; resolva manualmente.'
+            );
+            continue;
+        }
+
+        const pendente = pendentes[0];
+        const sold = [...candidatos][0];
+        try {
+            await withTransaction(async (client) => {
+                await client.query('UPDATE clientes SET customer_number = $1 WHERE id = $2', [sold, pendente.id]);
+                // Espelha o SOLD na solicitação de origem — é o que a tela de
+                // cadastros mostra para a gestão saber que a Froneri já cadastrou.
+                await client.query('UPDATE cadastros SET customer_number = $1 WHERE cliente_id = $2', [sold, pendente.id]);
+            });
+            adotados++;
+            console.log(`[import/adocao] SOLD ${sold} atribuído a "${pendente.customer_name}" (CNPJ ${cnpj})`);
+        } catch (e: any) {
+            console.error(`[import/adocao] Falha ao atribuir SOLD ${sold} ao cliente ${pendente.id}:`, e.message);
+        }
+    }
+
+    if (adotados > 0) console.log(`[import/adocao] ${adotados} cliente(s) pendente(s) receberam SOLD da planilha`);
+    return adotados;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // 1. IMPORTAR RELATÓRIO DE VENDAS (xlsb da Froneri)
 //    Ordem obrigatória: Base Ruptura → Base Vendas → Base Ordens Carteira
@@ -385,6 +463,18 @@ async function processarRelatorioVendas(filePath: string, _usuarioId: string, lo
             linhas: { ruptura: rupturaRows.length, vendas: vendasRows.length, pedidos: pedidosRows.length },
             periodo: `${periodoRelatorio.mes}/${periodoRelatorio.ano}`,
         });
+
+        // ── 1z. Adoção dos cadastros sem SOLD — ANTES de qualquer upsert ──────
+        // Precisa rodar antes de 1a/1b: os upserts casam por customer_number, e
+        // um pendente só passa a ter esse número aqui. Varre as duas abas porque
+        // o cliente novo pode aparecer primeiro na Base Vendas (venda faturada
+        // antes de entrar no roster de ruptura do mês).
+        try {
+            await adotarClientesSemSold([...rupturaRows, ...vendasRows]);
+        } catch (e: any) {
+            errosLog.push(`Adoção de cadastros sem SOLD: ${e.message}`);
+            console.error('[import/adocao] Falha geral:', e.message);
+        }
 
         // ── 1a. Base Ruptura — PRIMEIRO (popula clientes) ─────────────────────
         if (rupturaRows.length > 0) {
@@ -1207,4 +1297,5 @@ export {
     importarRelatorioVendas,
     iniciarImportacaoRelatorioVendas,
     loadVendedoresMap,
+    adotarClientesSemSold,
 };
