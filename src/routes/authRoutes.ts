@@ -9,7 +9,7 @@ import { randomUUID } from 'crypto';
 const router = Router();
 const JWT_SECRET = process.env.JWT_SECRET as string;
 
-const ROLES_PERMITIDAS = ['admin', 'gerente', 'vendedor'];
+const ROLES_PERMITIDAS = ['admin', 'gerente', 'supervisor', 'vendedor'];
 
 function extrairTokenDoHeader(req) {
     const authHeader = req.headers.authorization;
@@ -137,7 +137,7 @@ router.post('/register', async (req, res) => {
         if (primeiroCadastro) {
             roleFinal = 'admin';
         } else if (!ROLES_PERMITIDAS.includes(roleFinal)) {
-            return res.status(400).json({ erro: 'Role inválida. Use: admin, gerente ou vendedor.' });
+            return res.status(400).json({ erro: `Role inválida. Use: ${ROLES_PERMITIDAS.join(', ')}.` });
         }
 
         const senhaHash = await bcrypt.hash(String(senha), 12);

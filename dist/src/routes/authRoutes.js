@@ -38,7 +38,7 @@ var import_auth = require("../middleware/auth");
 var import_crypto = require("crypto");
 const router = (0, import_express.Router)();
 const JWT_SECRET = process.env.JWT_SECRET;
-const ROLES_PERMITIDAS = ["admin", "gerente", "vendedor"];
+const ROLES_PERMITIDAS = ["admin", "gerente", "supervisor", "vendedor"];
 function extrairTokenDoHeader(req) {
   const authHeader = req.headers.authorization;
   if (!authHeader || !authHeader.startsWith("Bearer ")) return null;
@@ -142,7 +142,7 @@ router.post("/register", async (req, res) => {
     if (primeiroCadastro) {
       roleFinal = "admin";
     } else if (!ROLES_PERMITIDAS.includes(roleFinal)) {
-      return res.status(400).json({ erro: "Role inv\xE1lida. Use: admin, gerente ou vendedor." });
+      return res.status(400).json({ erro: `Role inv\xE1lida. Use: ${ROLES_PERMITIDAS.join(", ")}.` });
     }
     const senhaHash = await import_bcryptjs.default.hash(String(senha), 12);
     const usuarioId = (0, import_crypto.randomUUID)();

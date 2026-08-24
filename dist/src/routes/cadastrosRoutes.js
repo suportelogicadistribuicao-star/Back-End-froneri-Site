@@ -43,6 +43,31 @@ const router = (0, import_express.Router)();
 const STATUS_VALIDOS = ["pendente", "em_analise", "aprovado", "recusado", "concluido"];
 const CANAIS_VALIDOS = ["ATC", "C&C", "PQS", "SMR", "VAREJO"];
 const VOLTAGENS_VALIDAS = ["110V", "220V"];
+function validarDataFiltro(valor, nome) {
+  if (valor === void 0 || valor === "") return null;
+  const data = String(valor);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) {
+    throw new Error(`Par\xE2metro ${nome} inv\xE1lido. Use o formato AAAA-MM-DD.`);
+  }
+  const [ano, mes, dia] = data.split("-").map(Number);
+  const dataValida = new Date(Date.UTC(ano, mes - 1, dia));
+  if (dataValida.getUTCFullYear() !== ano || dataValida.getUTCMonth() !== mes - 1 || dataValida.getUTCDate() !== dia) {
+    throw new Error(`Par\xE2metro ${nome} inv\xE1lido. Use uma data existente.`);
+  }
+  return data;
+}
+function montarFiltroData(inicio, fim, coluna, parametros) {
+  const filtros = [];
+  if (inicio) {
+    parametros.push(inicio);
+    filtros.push(`${coluna} >= $${parametros.length}`);
+  }
+  if (fim) {
+    parametros.push(fim);
+    filtros.push(`${coluna} < DATE_ADD($${parametros.length}, INTERVAL 1 DAY)`);
+  }
+  return filtros.length ? ` AND ${filtros.join(" AND ")}` : "";
+}
 const CAMPOS_OBRIGATORIOS = [
   "cnpj",
   "razao_social",
@@ -216,6 +241,98 @@ function uploadFotosMiddleware(req, res, next) {
     return res.status(400).json({ erro: mensagem });
   });
 }
+router.get("/estatisticas", import_auth.authMiddleware, import_auth.ownDataOnly, async (req, res) => {
+  let dataInicio;
+  let dataFim;
+  try {
+    dataInicio = validarDataFiltro(req.query.data_inicio, "data_inicio");
+    dataFim = validarDataFiltro(req.query.data_fim, "data_fim");
+    if (dataInicio && dataFim && dataInicio > dataFim) {
+      return res.status(400).json({ erro: "data_inicio n\xE3o pode ser maior que data_fim." });
+    }
+  } catch (err) {
+    return res.status(400).json({ erro: err.message });
+  }
+  try {
+    const filtroVendedor = req.filtroVendedor;
+    const totaisParams = [];
+    let totaisWhere = "WHERE 1 = 1";
+    if (filtroVendedor) {
+      totaisParams.push(filtroVendedor);
+      totaisWhere += ` AND c.vendedor_id = $${totaisParams.length}`;
+    }
+    totaisWhere += montarFiltroData(dataInicio, dataFim, "c.created_at", totaisParams);
+    const vendedoresParams = [];
+    let vendedoresWhere = "WHERE 1 = 1";
+    if (filtroVendedor) {
+      vendedoresParams.push(filtroVendedor);
+      vendedoresWhere += ` AND c.vendedor_id = $${vendedoresParams.length}`;
+    }
+    vendedoresWhere += montarFiltroData(dataInicio, dataFim, "c.created_at", vendedoresParams);
+    let vendedoresFiltroId = "";
+    if (filtroVendedor) {
+      vendedoresParams.push(filtroVendedor);
+      vendedoresFiltroId = ` AND v.id = $${vendedoresParams.length}`;
+    }
+    const [totaisRes, vendedoresRes] = await Promise.all([
+      (0, import_database.query)(`
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(c.status = 'pendente') AS pendente,
+                    SUM(c.status = 'em_analise') AS em_analise,
+                    SUM(c.status = 'aprovado') AS aprovado,
+                    SUM(c.status = 'recusado') AS recusado,
+                    SUM(c.status = 'concluido') AS concluido
+                FROM cadastros c
+                ${totaisWhere}
+            `, totaisParams),
+      (0, import_database.query)(`
+                SELECT
+                    v.id AS vendedor_id,
+                    v.codigo_vendedor,
+                    v.nome AS vendedor_nome,
+                    COALESCE(s.total, 0) AS total,
+                    COALESCE(s.pendente, 0) AS pendente,
+                    COALESCE(s.em_analise, 0) AS em_analise,
+                    COALESCE(s.aprovado, 0) AS aprovado,
+                    COALESCE(s.recusado, 0) AS recusado,
+                    COALESCE(s.concluido, 0) AS concluido
+                FROM vendedores v
+                LEFT JOIN (
+                    SELECT
+                        c.vendedor_id,
+                        COUNT(*) AS total,
+                        SUM(c.status = 'pendente') AS pendente,
+                        SUM(c.status = 'em_analise') AS em_analise,
+                        SUM(c.status = 'aprovado') AS aprovado,
+                        SUM(c.status = 'recusado') AS recusado,
+                        SUM(c.status = 'concluido') AS concluido
+                    FROM cadastros c
+                    ${vendedoresWhere}
+                    GROUP BY c.vendedor_id
+                ) s ON s.vendedor_id = v.id
+                WHERE v.ativo = TRUE
+                ${vendedoresFiltroId}
+                ORDER BY v.nome
+            `, vendedoresParams)
+    ]);
+    const camposStatus = ["total", ...STATUS_VALIDOS];
+    const normalizar = (linha) => Object.fromEntries(camposStatus.map((campo) => [campo, Number(linha?.[campo] ?? 0)]));
+    res.json({
+      periodo: { data_inicio: dataInicio, data_fim: dataFim },
+      por_status: normalizar(totaisRes.rows[0]),
+      vendedores: vendedoresRes.rows.map((linha) => ({
+        vendedor_id: linha.vendedor_id,
+        codigo_vendedor: linha.codigo_vendedor != null ? String(linha.codigo_vendedor) : null,
+        vendedor_nome: linha.vendedor_nome,
+        ...normalizar(linha)
+      }))
+    });
+  } catch (err) {
+    console.error("[cadastros/estatisticas]", err);
+    res.status(500).json({ erro: "Erro ao carregar estat\xEDsticas de cadastros." });
+  }
+});
 router.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req, res) => {
   try {
     const { status, vendedor_id, page = 1, limit = 1e3 } = req.query;

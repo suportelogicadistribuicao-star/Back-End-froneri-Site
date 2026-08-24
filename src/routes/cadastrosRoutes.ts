@@ -8,6 +8,11 @@
 //                                      SEM SOLD — quem emite o SOLD é a Froneri,
 //                                      e a importação o preenche depois
 //   DELETE /api/cadastros/:id        → exclui (vendedor: só a própria, pendente/em_analise)
+//   GET    /api/cadastros/estatisticas → contadores por status: consolidado,
+//                                      quebra por mês e quebra por vendedor.
+//                                      Filtros: data_inicio, data_fim (AAAA-MM-DD,
+//                                      inclusivos) e vendedor_id (só gestão —
+//                                      vendedor fica preso ao próprio escopo)
 // As fotos ficam no Backblaze B2 (chaves gravadas no JSON `fotos`); a API
 // devolve URLs assinadas de leitura, prontas para abrir no navegador.
 import { Router } from 'express';
@@ -22,9 +27,58 @@ import { s3Client, B2_BUCKET, getPresignedGetUrl } from '../config/b2';
 
 const router = Router();
 
-const STATUS_VALIDOS = ['pendente', 'em_analise', 'aprovado', 'recusado', 'concluido'];
+// `em_andamento`, `reanalise` e `reativacao` já existiam na base (vieram da
+// carga inicial) mas estavam fora desta lista — o que os deixava de fora das
+// estatísticas e fazia a soma por status não fechar com o total.
+const STATUS_VALIDOS = [
+    'pendente', 'em_analise', 'em_andamento', 'reanalise', 'reativacao',
+    'aprovado', 'recusado', 'concluido',
+];
+
+// Colunas SUM(...) do agregado, geradas da lista acima para as duas queries
+// (consolidado e por mês) nunca saírem de sincronia com ela.
+const COLUNAS_STATUS = STATUS_VALIDOS
+    .map((s) => `SUM(c.status = '${s}') AS ${s}`)
+    .join(',\n                    ');
+
+/** Mesma lista, do lado de fora do LEFT JOIN: vendedor sem cadastro vira 0. */
+const COLUNAS_COALESCE = STATUS_VALIDOS
+    .map((s) => `COALESCE(s.${s}, 0) AS ${s}`)
+    .join(',\n                    ');
 const CANAIS_VALIDOS = ['ATC', 'C&C', 'PQS', 'SMR', 'VAREJO'];
 const VOLTAGENS_VALIDAS = ['110V', '220V'];
+
+function validarDataFiltro(valor: unknown, nome: string): string | null {
+    if (valor === undefined || valor === '') return null;
+    const data = String(valor);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) {
+        throw new Error(`Parâmetro ${nome} inválido. Use o formato AAAA-MM-DD.`);
+    }
+    const [ano, mes, dia] = data.split('-').map(Number);
+    const dataValida = new Date(Date.UTC(ano, mes - 1, dia));
+    if (dataValida.getUTCFullYear() !== ano || dataValida.getUTCMonth() !== mes - 1 || dataValida.getUTCDate() !== dia) {
+        throw new Error(`Parâmetro ${nome} inválido. Use uma data existente.`);
+    }
+    return data;
+}
+
+function montarFiltroData(
+    inicio: string | null,
+    fim: string | null,
+    coluna: string,
+    parametros: unknown[],
+): string {
+    const filtros: string[] = [];
+    if (inicio) {
+        parametros.push(inicio);
+        filtros.push(`${coluna} >= $${parametros.length}`);
+    }
+    if (fim) {
+        parametros.push(fim);
+        filtros.push(`${coluna} < DATE_ADD($${parametros.length}, INTERVAL 1 DAY)`);
+    }
+    return filtros.length ? ` AND ${filtros.join(' AND ')}` : '';
+}
 
 // Campos de texto obrigatórios do formulário (iguais no POST e no PUT de edição).
 const CAMPOS_OBRIGATORIOS = [
@@ -242,6 +296,136 @@ function uploadFotosMiddleware(req, res, next) {
         return res.status(400).json({ erro: mensagem });
     });
 }
+
+// ── GET /api/cadastros/estatisticas ─────────────────────────────────────────
+// Gestão recebe o consolidado e uma linha por vendedor. Vendedor recebe o
+// mesmo contrato, mas apenas a própria linha, aplicado pelo JWT.
+// Filtros: data_inicio e data_fim no formato AAAA-MM-DD, inclusivos.
+router.get('/estatisticas', authMiddleware, ownDataOnly, async (req, res) => {
+    let dataInicio: string | null;
+    let dataFim: string | null;
+    try {
+        dataInicio = validarDataFiltro(req.query.data_inicio, 'data_inicio');
+        dataFim = validarDataFiltro(req.query.data_fim, 'data_fim');
+        if (dataInicio && dataFim && dataInicio > dataFim) {
+            return res.status(400).json({ erro: 'data_inicio não pode ser maior que data_fim.' });
+        }
+    } catch (err: any) {
+        return res.status(400).json({ erro: err.message });
+    }
+
+    try {
+        const filtroVendedor = req.filtroVendedor;
+
+        // Dois escopos diferentes, de propósito:
+        //   filtroTotais     → `por_status` e `por_mes`. Vendedor: preso ao JWT.
+        //                      Gestão: pode escolher um vendedor pelo query param
+        //                      `vendedor_id` (o uuid devolvido em `vendedores[]`).
+        //   filtroVendedor   → `vendedores[]`. Só o do JWT. Se o `vendedor_id`
+        //                      escolhido também cortasse esta lista, o seletor do
+        //                      front ficaria com uma opção só e não teria como
+        //                      voltar para outro vendedor.
+        // Vendedor logado nunca escapa do próprio escopo: `ownDataOnly` já
+        // preencheu req.filtroVendedor, e ele vence o query param.
+        const vendedorEscolhido = String(req.query.vendedor_id ?? '').trim();
+        const filtroTotais = filtroVendedor || vendedorEscolhido || null;
+
+        const totaisParams: unknown[] = [];
+        let totaisWhere = 'WHERE 1 = 1';
+        if (filtroTotais) {
+            totaisParams.push(filtroTotais);
+            totaisWhere += ` AND c.vendedor_id = $${totaisParams.length}`;
+        }
+        totaisWhere += montarFiltroData(dataInicio, dataFim, 'c.created_at', totaisParams);
+
+        const vendedoresParams: unknown[] = [];
+        let vendedoresWhere = 'WHERE 1 = 1';
+        if (filtroVendedor) {
+            vendedoresParams.push(filtroVendedor);
+            vendedoresWhere += ` AND c.vendedor_id = $${vendedoresParams.length}`;
+        }
+        vendedoresWhere += montarFiltroData(dataInicio, dataFim, 'c.created_at', vendedoresParams);
+
+        // normalizeSql() troca todo $n por ? na ordem do texto, então este
+        // filtro — que fica DEPOIS da subquery — precisa do próprio parâmetro.
+        // Reaproveitar o $1 do WHERE interno deixava um ? sem valor e o MySQL
+        // rejeitava a query inteira (todo request de vendedor virava 500).
+        let vendedoresFiltroId = '';
+        if (filtroVendedor) {
+            vendedoresParams.push(filtroVendedor);
+            vendedoresFiltroId = ` AND v.id = $${vendedoresParams.length}`;
+        }
+
+        const [totaisRes, mesesRes, vendedoresRes] = await Promise.all([
+            query(`
+                SELECT
+                    COUNT(*) AS total,
+                    ${COLUNAS_STATUS}
+                FROM cadastros c
+                ${totaisWhere}
+            `, totaisParams),
+            // Mesma janela e mesmo escopo do consolidado — só quebrado por mês.
+            // Reaproveita totaisWhere/totaisParams de propósito: normalizeSql()
+            // troca $n por ? na ordem do TEXTO, então repetir o mesmo WHERE com
+            // o mesmo array mantém os placeholders alinhados.
+            // Devolve só os meses com solicitação; o front completa o ano.
+            query(`
+                SELECT
+                    MONTH(c.created_at) AS mes,
+                    COUNT(*) AS total,
+                    ${COLUNAS_STATUS}
+                FROM cadastros c
+                ${totaisWhere}
+                GROUP BY MONTH(c.created_at)
+                ORDER BY mes
+            `, totaisParams),
+            query(`
+                SELECT
+                    v.id AS vendedor_id,
+                    v.codigo_vendedor,
+                    v.nome AS vendedor_nome,
+                    COALESCE(s.total, 0) AS total,
+                    ${COLUNAS_COALESCE}
+                FROM vendedores v
+                LEFT JOIN (
+                    SELECT
+                        c.vendedor_id,
+                        COUNT(*) AS total,
+                        ${COLUNAS_STATUS}
+                    FROM cadastros c
+                    ${vendedoresWhere}
+                    GROUP BY c.vendedor_id
+                ) s ON s.vendedor_id = v.id
+                WHERE v.ativo = TRUE
+                ${vendedoresFiltroId}
+                ORDER BY v.nome
+            `, vendedoresParams),
+        ]);
+
+        const camposStatus = ['total', ...STATUS_VALIDOS];
+        const normalizar = (linha: any): Record<string, number> =>
+            Object.fromEntries(camposStatus.map((campo) => [campo, Number(linha?.[campo] ?? 0)]));
+
+        res.json({
+            periodo: { data_inicio: dataInicio, data_fim: dataFim },
+            vendedor_id: filtroTotais,
+            por_status: normalizar(totaisRes.rows[0]),
+            por_mes: mesesRes.rows.map((linha: any) => ({
+                mes: Number(linha.mes),
+                ...normalizar(linha),
+            })),
+            vendedores: vendedoresRes.rows.map((linha: any) => ({
+                vendedor_id: linha.vendedor_id,
+                codigo_vendedor: linha.codigo_vendedor != null ? String(linha.codigo_vendedor) : null,
+                vendedor_nome: linha.vendedor_nome,
+                ...normalizar(linha),
+            })),
+        });
+    } catch (err) {
+        console.error('[cadastros/estatisticas]', err);
+        res.status(500).json({ erro: 'Erro ao carregar estatísticas de cadastros.' });
+    }
+});
 
 // ── GET /api/cadastros ───────────────────────────────────────────────────────
 router.get('/', authMiddleware, ownDataOnly, async (req, res) => {

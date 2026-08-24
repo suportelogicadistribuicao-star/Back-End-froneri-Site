@@ -32,12 +32,17 @@ function requireRole(...roles) {
     };
 }
 
-// Vendedor só vê os próprios dados (a menos que seja admin/gerente).
+// Roles da área comercial: enxergam a base inteira, de todos os vendedores.
+// Supervisor entra só na visão — aprovar/editar cadastro, importar planilha e
+// gerir usuários seguem em requireRole('admin', 'gerente') / ('admin').
+const ROLES_VISAO_TOTAL = ['admin', 'gerente', 'supervisor'];
+
+// Vendedor só vê os próprios dados (a menos que seja da área comercial).
 // Falha FECHADO: usuário sem vendedor vinculado não tem escopo de dados —
 // seguir sem filtro exporia a base inteira da empresa a qualquer token
 // cujo vendedor_id seja null/0.
 function ownDataOnly(req, res, next) {
-    if (['admin', 'gerente'].includes(req.usuario?.role)) return next();
+    if (ROLES_VISAO_TOTAL.includes(req.usuario?.role)) return next();
     if (!req.usuario?.vendedor_id) {
         return res.status(403).json({ erro: 'Usuário sem vendedor vinculado. Contate o administrador.' });
     }
@@ -45,5 +50,5 @@ function ownDataOnly(req, res, next) {
     next();
 }
 
-export { authMiddleware, requireRole, ownDataOnly };
+export { authMiddleware, requireRole, ownDataOnly, ROLES_VISAO_TOTAL };
 

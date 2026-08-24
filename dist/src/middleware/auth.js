@@ -27,6 +27,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 var auth_exports = {};
 __export(auth_exports, {
+  ROLES_VISAO_TOTAL: () => ROLES_VISAO_TOTAL,
   authMiddleware: () => authMiddleware,
   ownDataOnly: () => ownDataOnly,
   requireRole: () => requireRole
@@ -60,8 +61,9 @@ function requireRole(...roles) {
     next();
   };
 }
+const ROLES_VISAO_TOTAL = ["admin", "gerente", "supervisor"];
 function ownDataOnly(req, res, next) {
-  if (["admin", "gerente"].includes(req.usuario?.role)) return next();
+  if (ROLES_VISAO_TOTAL.includes(req.usuario?.role)) return next();
   if (!req.usuario?.vendedor_id) {
     return res.status(403).json({ erro: "Usu\xE1rio sem vendedor vinculado. Contate o administrador." });
   }
@@ -70,6 +72,7 @@ function ownDataOnly(req, res, next) {
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  ROLES_VISAO_TOTAL,
   authMiddleware,
   ownDataOnly,
   requireRole
