@@ -795,7 +795,14 @@ async function processarRelatorioVendas(filePath: string, _usuarioId: string, lo
         }
 
         // ── 1c. Base Ordens Carteira ─────────────────────────────────────────
-        if (pedidosRows.length > 0) {
+        // A aba de carteira é a ÚNICA fonte de verdade sobre a carteira. Se ela
+        // veio PRESENTE porém VAZIA, isso significa "não há mais nada em
+        // carteira" — e o banco tem que ser ZERADO, não preservado. Por isso o
+        // guard é a EXISTÊNCIA da aba (sheetName), e não a contagem de linhas:
+        // com `pedidosRows.length > 0` uma aba vazia pulava o bloco inteiro,
+        // inclusive o DELETE lá embaixo, e a carteira antiga sobrevivia
+        // indefinidamente — como se a planilha nada tivesse dito.
+        if (pedidosSheet.sheetName !== null) {
             const PEDIDO_COLS = [
                 'customer_number', 'customer_name', 'order_number', 'order_date',
                 'vendedor_id', 'vendedor_alias', 'territory_number',
@@ -878,15 +885,19 @@ async function processarRelatorioVendas(filePath: string, _usuarioId: string, lo
             // pedido em vez de perder as 348 de uma vez.
             const produtosExistentes = new Set<string>();
             const clientesExistentes = new Set<number>();
-            try {
-                const [prodRes, cliRes] = await Promise.all([
-                    query('SELECT cod_item FROM produtos'),
-                    query('SELECT customer_number FROM clientes'),
-                ]);
-                for (const r of prodRes.rows) produtosExistentes.add(String(r.cod_item));
-                for (const r of cliRes.rows)  clientesExistentes.add(Number(r.customer_number));
-            } catch (e: any) {
-                console.error('[import/pedidos] Falha ao carregar chaves para validação de FK:', e.message);
+            // Só vale carregar as chaves se houver linhas para validar — numa
+            // carteira vazia essas duas leituras de tabela seriam desperdício.
+            if (pedidosRows.length > 0) {
+                try {
+                    const [prodRes, cliRes] = await Promise.all([
+                        query('SELECT cod_item FROM produtos'),
+                        query('SELECT customer_number FROM clientes'),
+                    ]);
+                    for (const r of prodRes.rows) produtosExistentes.add(String(r.cod_item));
+                    for (const r of cliRes.rows)  clientesExistentes.add(Number(r.customer_number));
+                } catch (e: any) {
+                    console.error('[import/pedidos] Falha ao carregar chaves para validação de FK:', e.message);
+                }
             }
 
             let pedidosSemProduto = 0;
@@ -1005,7 +1016,12 @@ async function processarRelatorioVendas(filePath: string, _usuarioId: string, lo
                         contadores.pedidos += rowCount;
                     }
                 });
-                console.log(`[import/pedidos] carteira substituída: ${contadores.pedidos} registro(s) inserido(s)`);
+                if (pedidosRows.length === 0) {
+                    console.warn('[import/pedidos] aba de carteira PRESENTE e VAZIA — carteira zerada conforme a planilha');
+                    errosLog.push('Aviso: aba "Base Ordens Carteira" veio vazia — carteira zerada conforme a planilha.');
+                } else {
+                    console.log(`[import/pedidos] carteira substituída: ${contadores.pedidos} registro(s) inserido(s)`);
+                }
             } catch (e: any) {
                 // Rollback já devolveu a carteira anterior — nada foi perdido.
                 contadores.erros += contadores.pedidos;
