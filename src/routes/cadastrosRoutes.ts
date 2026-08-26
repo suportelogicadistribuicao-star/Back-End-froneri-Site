@@ -275,8 +275,27 @@ function limparTemporarios(files: Express.Multer.File[]): void {
     }
 }
 
+// A coluna `fotos` tem DUAS gerações de dado convivendo: as solicitações novas
+// gravam a chave do B2 (`cadastros/<id>/<arquivo>`); as importadas da planilha
+// antiga gravam a URL completa do Google Drive. Assinar uma URL como se fosse
+// chave produz um link para o bucket com a URL escapada dentro (404 garantido)
+// e um erro no log por foto, a cada GET. O formato é o que separa os dois casos.
+function ehUrlExterna(valor: string): boolean {
+    return /^https?:\/\//i.test(valor);
+}
+
+// Foto que já mora fora do nosso storage: nada a assinar, só a decidir em que
+// forma ela vai para o front.
+// TODO(front): links do Drive no formato `open?id=` abrem a página do Drive —
+// não renderizam dentro de <img>. Ver pergunta em aberto.
+function urlDeExibicaoExterna(url: string): string {
+    return url;
+}
+
 async function apagarFotosDoB2(chaves: string[]): Promise<void> {
-    await Promise.all(chaves.map((chave) =>
+    // Foto do Drive não é arquivo nosso: não há o que apagar no bucket, e
+    // mandar a URL como Key só geraria erro de delete inexistente no log.
+    await Promise.all(chaves.filter((c) => !ehUrlExterna(c)).map((chave) =>
         s3Client.send(new DeleteObjectCommand({ Bucket: B2_BUCKET, Key: chave }))
             .catch((err) => console.error('[cadastros] Falha ao remover foto do B2:', chave, err.message))
     ));
@@ -324,10 +343,26 @@ function criadoPorTerceiro(row: any): boolean {
     return !mesmoNome(criadorNome, vendedorNome);
 }
 
+// Assinar a URL de uma foto pode falhar por motivos que nada têm a ver com o
+// cadastro: storage mal configurado, credencial revogada, B2 fora do ar. Com
+// Promise.all, UMA falha dessas rejeita a listagem inteira — o usuário perde
+// todos os cadastros por causa de uma foto. Por isso cada chave é resolvida
+// isoladamente e a política abaixo decide o que a lista mostra no lugar.
+async function urlDaFoto(chave: string): Promise<string | null> {
+    if (ehUrlExterna(chave)) return urlDeExibicaoExterna(chave);
+    try {
+        return await getPresignedGetUrl(chave);
+    } catch (err: any) {
+        console.error('[cadastros] Falha ao assinar URL da foto:', chave, err.message);
+        // TODO(política de degradação): provisório — a foto some da lista.
+        return null;
+    }
+}
+
 // Linha do banco (com JOIN em vendedores) → objeto no formato que o front espera.
 async function montarCadastro(row: any): Promise<Record<string, any>> {
     const chaves = chavesDasFotos(row.fotos);
-    const fotos = await Promise.all(chaves.map((chave) => getPresignedGetUrl(chave)));
+    const fotos = (await Promise.all(chaves.map(urlDaFoto))).filter((u): u is string => u !== null);
     return {
         id: row.id,
         cadastro_froneri_wmc: ['1', 'true', 'sim', 's'].includes(String(row.cadastro_froneri_wmc).toLowerCase()),

@@ -267,6 +267,33 @@ router.get('/me', authMiddleware, async (req, res) => {
     }
 });
 
+// GET /api/auth/usuarios
+// Quem tem login ativo, para os seletores do front — hoje o prospector da
+// solicitação de cadastro, que precisa ser gente com conta no sistema e não a
+// lista de `vendedores` (nem todo vendedor tem login, e supervisor/gerente
+// prospecta sem ter território).
+// Devolve nome + o vínculo com vendedores; `vendedor_*` vem nulo para quem não
+// é vendedor. Nunca devolve senha_hash — é uma lista de nomes, não a tela de
+// gestão de acesso. Aberta a qualquer autenticado porque o vendedor também
+// precisa dela para abrir solicitação; os e-mails já são expostos no mesmo
+// escopo por GET /api/vendedores.
+router.get('/usuarios', authMiddleware, async (_req, res) => {
+    try {
+        const result = await query(
+            `SELECT u.id, u.nome, u.email, u.role,
+                    v.id AS vendedor_id, v.nome AS vendedor_nome, v.codigo_vendedor
+             FROM usuarios u
+             LEFT JOIN vendedores v ON v.usuario_id = u.id AND v.ativo = TRUE
+             WHERE u.ativo = TRUE
+             ORDER BY u.nome`
+        );
+        res.json(result.rows);
+    } catch (err) {
+        console.error('[auth/usuarios]', err);
+        res.status(500).json({ erro: 'Erro ao listar usuários.' });
+    }
+});
+
 // PUT /api/auth/senha
 async function alterarSenhaHandler(req, res) {
     try {
