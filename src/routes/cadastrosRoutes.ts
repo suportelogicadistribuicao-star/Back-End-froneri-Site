@@ -35,6 +35,11 @@ const STATUS_VALIDOS = [
     'aprovado', 'recusado', 'concluido',
 ];
 
+// Status que ENCERRAM a solicitação. Espelha STATUS_ENCERRADOS do front
+// (src/types/cadastros.ts). Entrar em um deles carimba `finalizado_em`, que é
+// o que alimenta o filtro por mês de conclusão na tela.
+const STATUS_TERMINAIS = ['aprovado', 'recusado', 'concluido'];
+
 // Colunas SUM(...) do agregado, geradas da lista acima para as duas queries
 // (consolidado e por mês) nunca saírem de sincronia com ela.
 const COLUNAS_STATUS = STATUS_VALIDOS
@@ -264,6 +269,10 @@ async function montarCadastro(row: any): Promise<Record<string, any>> {
         vendedor_nome: row.vendedor_nome_atual ?? row.vendedor_nome ?? null,
         criado_em: paraIso(row.created_at),
         atualizado_em: paraIso(row.updated_at),
+        // Sem este campo o filtro por mês de conclusão da tela devolve lista
+        // vazia sempre: ele descarta toda linha cuja data de conclusão não
+        // chega. Foi exatamente o bug que esta coluna veio resolver.
+        finalizado_em: paraIso(row.finalizado_em),
     };
 }
 
@@ -585,6 +594,18 @@ router.put('/:id/status', authMiddleware, requireRole('admin', 'gerente'), async
             ? (String(observacao).trim() || null)
             : existente.observacao;
 
+        // NOW() do banco, e não um `new Date()` do Node: `created_at` e
+        // `updated_at` já saem do relógio do MySQL, e misturar os dois relógios
+        // deixaria a data de conclusão minutos fora das outras duas.
+        // O valor é um literal de um ternário fechado — não há entrada de
+        // usuário nesta interpolação.
+        //
+        // Terminal → terminal reestampa DE PROPÓSITO: aprovado em julho e
+        // concluído em agosto conta em agosto, que é quando o cliente nasce na
+        // base. Terminal → aberto zera: a solicitação voltou para o funil e
+        // deixou de ter data de conclusão.
+        const carimbo = STATUS_TERMINAIS.includes(String(status)) ? 'NOW()' : 'NULL';
+
         if (String(status) === 'concluido' && !existente.cliente_id) {
             // Efeito colateral crítico: cria o cliente definitivo vinculado ao
             // vendedor da solicitação. cliente_id já preenchido = cliente criado
@@ -625,13 +646,14 @@ router.put('/:id/status', authMiddleware, requireRole('admin', 'gerente'), async
 
                 await client.query(`
                     UPDATE cadastros
-                    SET status = $1, observacao = $2, cliente_id = $3, vendedor_id = $4
+                    SET status = $1, observacao = $2, cliente_id = $3, vendedor_id = $4,
+                        finalizado_em = ${carimbo}
                     WHERE id = $5
                 `, ['concluido', novaObservacao, clienteId, vendedorId, existente.id]);
             });
         } else {
             await query(
-                'UPDATE cadastros SET status = $1, observacao = $2 WHERE id = $3',
+                `UPDATE cadastros SET status = $1, observacao = $2, finalizado_em = ${carimbo} WHERE id = $3`,
                 [String(status), novaObservacao, existente.id]
             );
         }
