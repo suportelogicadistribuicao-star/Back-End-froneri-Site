@@ -782,7 +782,7 @@ router.get('/relatorio', authMiddleware, ownDataOnly, async (req, res) => {
 
     const [
       kpisQ, devQ, resumoQ, clientesQ, mensalQ, rupturaQ, transTotalQ, transQ,
-      consClientesQ, consVendedoresQ,
+      consClientesQ, consVendedoresQ, consClientesMesQ, consVendedoresMesQ,
     ] = await Promise.all([
       // ── BRUTO — só VENDA ────────────────────────────────────────────────
       query(`
@@ -974,6 +974,53 @@ router.get('/relatorio', authMiddleware, ownDataOnly, async (req, res) => {
         GROUP BY vendedor
         ORDER BY valor DESC
       `, baseParams),
+
+      // ── [v8] Os dois consolidados acima ABERTOS POR MÊS ─────────────
+      // Mesmas expressões, com `mes_numero` no GROUP BY. É o que o Excel
+      // lista quando o relatório cobre mais de um mês: uma linha por
+      // (mês, cliente, vendedor), com o total do vendedor DAQUELE MÊS ao
+      // lado. Os agregados do período continuam acima para o PDF e para o
+      // front já publicado — a seção é acrescida, nunca trocada.
+      query(`
+        SELECT ve.mes_numero                          AS mes,
+               ve.customer_number                     AS sold,
+               MAX(CASE WHEN ve.origem_linha = 'VENDA'
+                        THEN ve.customer_name END)    AS cliente,
+               ${vendedorExpr}                        AS vendedor,
+               MAX(ve.canal_cliente)                  AS canal,
+               MAX(ve.segmentacao_cliente)            AS segmentacao,
+               MAX(ve.city)                           AS city,
+               COALESCE(SUM(ve.valor_nf), 0)          AS valor,
+               COALESCE(SUM(CASE WHEN ve.origem_linha = 'DEVOLUCAO'
+                                 THEN ABS(ve.valor_nf) ELSE 0 END), 0) AS devolucoes,
+               COALESCE(SUM(ve.soma_caixas), 0)       AS caixas,
+               COALESCE(SUM(ve.soma_litros), 0)       AS litros,
+               COUNT(DISTINCT ve.numero_nf)           AS notas
+        FROM vw_vendas_liquidas ve
+        LEFT JOIN vendedores v ON v.id = ve.vendedor_id
+        ${baseWhere}
+        GROUP BY ve.mes_numero, ve.customer_number, vendedor
+        HAVING valor <> 0
+        ORDER BY ve.mes_numero, vendedor, valor DESC
+      `, baseParams),
+
+      query(`
+        SELECT ve.mes_numero                          AS mes,
+               ${vendedorExpr}                        AS vendedor,
+               COUNT(DISTINCT CASE WHEN ve.origem_linha = 'VENDA'
+                                   THEN ve.customer_number END) AS clientes,
+               COALESCE(SUM(ve.valor_nf), 0)          AS valor,
+               COALESCE(SUM(CASE WHEN ve.origem_linha = 'DEVOLUCAO'
+                                 THEN ABS(ve.valor_nf) ELSE 0 END), 0) AS devolucoes,
+               COALESCE(SUM(ve.soma_caixas), 0)       AS caixas,
+               COALESCE(SUM(ve.soma_litros), 0)       AS litros,
+               COUNT(DISTINCT ve.numero_nf)           AS notas
+        FROM vw_vendas_liquidas ve
+        LEFT JOIN vendedores v ON v.id = ve.vendedor_id
+        ${baseWhere}
+        GROUP BY ve.mes_numero, vendedor
+        ORDER BY ve.mes_numero, valor DESC
+      `, baseParams),
     ]);
 
     // ── LÍQUIDO = BRUTO − DEVOLUÇÕES ──────────────────────────────────────
@@ -1016,7 +1063,7 @@ router.get('/relatorio', authMiddleware, ownDataOnly, async (req, res) => {
     // O total do vendedor volta também colado em cada linha de cliente
     // (`valor_vendedor`) para o Excel não precisar de PROCV, e já com a
     // participação do cliente dentro da carteira daquele vendedor.
-    const consVendedores = consVendedoresQ.rows.map((r: any) => ({
+    const linhaVendedor = (r: any) => ({
       vendedor:   String(r.vendedor ?? 'Sem vendedor'),
       clientes:   num(r.clientes),
       valor:      num(r.valor),
@@ -1024,17 +1071,13 @@ router.get('/relatorio', authMiddleware, ownDataOnly, async (req, res) => {
       caixas:     num(r.caixas),
       litros:     num(r.litros),
       notas:      num(r.notas),
-    }));
-    const totalVendedorMap = new Map(consVendedores.map(v => [v.vendedor, v.valor]));
-
-    const consClientes = consClientesQ.rows.map((r: any) => {
-      const vendedor = String(r.vendedor ?? 'Sem vendedor');
-      const valor    = num(r.valor);
-      const totalVen = num(totalVendedorMap.get(vendedor));
+    });
+    const linhaCliente = (r: any, totalVen: number) => {
+      const valor = num(r.valor);
       return {
         sold:        r.sold,
         cliente:     String(r.cliente ?? '—'),
-        vendedor,
+        vendedor:    String(r.vendedor ?? 'Sem vendedor'),
         canal:       r.canal ?? null,
         segmentacao: r.segmentacao ?? null,
         city:        r.city ?? null,
@@ -1047,6 +1090,34 @@ router.get('/relatorio', authMiddleware, ownDataOnly, async (req, res) => {
         // Participação do cliente na carteira do vendedor. `null` quando a
         // carteira fecha em zero — dividir por zero não vira 0%, vira nada.
         pct_do_vendedor: totalVen !== 0 ? (valor / totalVen) * 100 : null,
+      };
+    };
+
+    const consVendedores = consVendedoresQ.rows.map(linhaVendedor);
+    const totalVendedorMap = new Map(consVendedores.map(v => [v.vendedor, v.valor]));
+    const consClientes = consClientesQ.rows.map((r: any) =>
+      linhaCliente(r, num(totalVendedorMap.get(String(r.vendedor ?? 'Sem vendedor')))));
+
+    // ── [v8] O mesmo consolidado, mês a mês ─────────────────────────────
+    // `valor_vendedor` e `pct_do_vendedor` aqui são DO MÊS: a linha de junho
+    // compara o cliente com a carteira de junho, não com a do intervalo. O
+    // carimbo usa o nome cheio do mês com o ano — o mesmo formato do
+    // `periodo.label` de um mês só — porque é o que vai na coluna "Mês" do
+    // Excel quando o usuário empilha vários arquivos.
+    const carimboMes = (mes: number) => ({ mes, ano, mes_label: `${MES_NOME[mes - 1]}/${ano}` });
+    const consVendedoresMensal = consVendedoresMesQ.rows.map((r: any) => ({
+      ...carimboMes(num(r.mes)),
+      ...linhaVendedor(r),
+    }));
+    const totalVendedorMesMap = new Map(
+      consVendedoresMensal.map(v => [`${v.mes}|${v.vendedor}`, v.valor]),
+    );
+    const consClientesMensal = consClientesMesQ.rows.map((r: any) => {
+      const mes      = num(r.mes);
+      const vendedor = String(r.vendedor ?? 'Sem vendedor');
+      return {
+        ...carimboMes(mes),
+        ...linhaCliente(r, num(totalVendedorMesMap.get(`${mes}|${vendedor}`))),
       };
     });
 
@@ -1113,8 +1184,10 @@ router.get('/relatorio', authMiddleware, ownDataOnly, async (req, res) => {
       top_clientes:     rankingClientes.slice(0, topN),
       ranking_clientes: rankingClientes,
       consolidado: {
-        clientes:   consClientes,
-        vendedores: consVendedores,
+        clientes:          consClientes,
+        vendedores:        consVendedores,
+        clientes_mensal:   consClientesMensal,
+        vendedores_mensal: consVendedoresMensal,
       },
       evolucao,
       transacoes: {
