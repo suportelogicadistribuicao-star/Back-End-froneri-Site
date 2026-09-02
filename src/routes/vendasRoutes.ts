@@ -363,6 +363,20 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
     if ((mes !== null && !Number.isInteger(mes)) || (ano !== null && !Number.isInteger(ano))) {
       return res.status(400).json({ erro: 'Parâmetros mes/ano inválidos.' });
     }
+
+    // [v7] Intervalo de meses (modo "período" da tela de Vendas). Convive com
+    // `mes`: quando mes_inicio/mes_fim vêm preenchidos o front omite `mes`, e o
+    // WHERE aplica só o BETWEEN. Intervalo invertido é normalizado, não é erro.
+    const mesIniRaw = req.query.mes_inicio ? Number(req.query.mes_inicio) : null;
+    const mesFimRaw = req.query.mes_fim    ? Number(req.query.mes_fim)    : null;
+    const faixaOk = [mesIniRaw, mesFimRaw].every(
+      m => m === null || (Number.isInteger(m) && m >= 1 && m <= 12),
+    );
+    if (!faixaOk || (mesIniRaw === null) !== (mesFimRaw === null)) {
+      return res.status(400).json({ erro: 'Parâmetros mes_inicio/mes_fim inválidos.' });
+    }
+    const mesInicio = mesIniRaw === null ? null : Math.min(mesIniRaw, mesFimRaw as number);
+    const mesFim    = mesFimRaw === null ? null : Math.max(mesIniRaw as number, mesFimRaw);
     const canal       = req.query.canal ? String(req.query.canal) : null;
     const segmentacao = req.query.segmentacao ? String(req.query.segmentacao) : null;
     const buscaRaw    = req.query.busca ? String(req.query.busca).trim() : '';
@@ -390,6 +404,8 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
     const whereSql = `
       WHERE 1 = 1
         AND (? IS NULL OR ve.mes_numero          = ?)
+        AND (? IS NULL OR ve.mes_numero         >= ?)
+        AND (? IS NULL OR ve.mes_numero         <= ?)
         AND (? IS NULL OR ve.ano                 = ?)
         AND (? IS NULL OR ve.vendedor_id         = ?)
         AND (? IS NULL OR ve.canal_cliente       = ?)
@@ -402,7 +418,7 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
         ))
     `;
     const params = [
-      mes, mes, ano, ano, fvId, fvId, canal, canal,
+      mes, mes, mesInicio, mesInicio, mesFim, mesFim, ano, ano, fvId, fvId, canal, canal,
       segmentacao, segmentacao, busca, busca, busca, busca, busca,
     ];
 
@@ -732,9 +748,18 @@ router.get('/relatorio', authMiddleware, ownDataOnly, async (req, res) => {
     const topN        = Math.min(Math.max(Number(req.query.top_n) || 10, 1), 50);
     const fvId        = req.filtroVendedor ?? null;
 
+    // [v7] A tela de Vendas em modo PERÍODO consome este mesmo endpoint para
+    // KPIs/gráficos/ranking, mas pagina a tabela pelo /vendas. Nesse caso pede
+    // `sem_transacoes=true` e o cap de 100k linhas nem é lido do banco.
+    const semTransacoes = String(req.query.sem_transacoes ?? '') === 'true';
+
     const grupoExpr = agrupar === 'vendedor'
       ? `TRIM(REPLACE(COALESCE(v.nome, 'Sem vendedor'), '_Logica MG', ''))`
       : `COALESCE(NULLIF(TRIM(ve.categoria), ''), 'Sem categoria')`;
+
+    // Nome do vendedor limpo — mesmo texto do grupoExpr='vendedor', porém
+    // disponível sempre: o consolidado é por vendedor independente do `agrupar`.
+    const vendedorExpr = `TRIM(REPLACE(COALESCE(v.nome, 'Sem vendedor'), '_Logica MG', ''))`;
 
     // Um WHERE só para as três views de vendas (mesmo contrato de colunas).
     const baseWhere = `
@@ -755,7 +780,10 @@ router.get('/relatorio', authMiddleware, ownDataOnly, async (req, res) => {
       segmentacao, segmentacao, busca, busca, busca, busca, busca,
     ];
 
-    const [kpisQ, devQ, resumoQ, clientesQ, mensalQ, rupturaQ, transTotalQ, transQ] = await Promise.all([
+    const [
+      kpisQ, devQ, resumoQ, clientesQ, mensalQ, rupturaQ, transTotalQ, transQ,
+      consClientesQ, consVendedoresQ,
+    ] = await Promise.all([
       // ── BRUTO — só VENDA ────────────────────────────────────────────────
       query(`
         SELECT
@@ -883,7 +911,9 @@ router.get('/relatorio', authMiddleware, ownDataOnly, async (req, res) => {
       `, baseParams),
 
       // ── Transações do intervalo (valor_nf já com sinal correto) ─────────
-      query(`
+      semTransacoes
+        ? Promise.resolve({ rows: [] as Record<string, unknown>[] })
+        : query(`
         SELECT
           ve.customer_number, ve.customer_name, ve.numero_nf, ve.data_faturamento,
           ve.descricao_produto, ve.categoria, ve.subcategoria, ve.categoria_total_sku,
@@ -896,6 +926,54 @@ router.get('/relatorio', authMiddleware, ownDataOnly, async (req, res) => {
         ORDER BY ve.data_faturamento DESC, ve.customer_number, ve.numero_nf
         LIMIT ?
       `, [...baseParams, RELATORIO_MAX_TRANSACOES]),
+
+      // ── CONSOLIDADO por CLIENTE × VENDEDOR ──────────────────────
+      // Uma linha por par (SOLD, vendedor) — o formato pedido para o Excel:
+      // SOLD · Cliente · Vendedor · vendas. Um mesmo SOLD atendido por dois
+      // vendedores no intervalo vira duas linhas, e é isso que se quer ver: a
+      // venda pertence a quem a fez.
+      //
+      // Agrega no BANCO, não sobre `transacoes` — o cap de 100k linhas
+      // truncaria o consolidado de intervalos longos em silêncio.
+      query(`
+        SELECT ve.customer_number AS sold,
+               MAX(CASE WHEN ve.origem_linha = 'VENDA'
+                        THEN ve.customer_name END)    AS cliente,
+               ${vendedorExpr}                        AS vendedor,
+               MAX(ve.canal_cliente)                  AS canal,
+               MAX(ve.segmentacao_cliente)            AS segmentacao,
+               MAX(ve.city)                           AS city,
+               COALESCE(SUM(ve.valor_nf), 0)          AS valor,
+               COALESCE(SUM(CASE WHEN ve.origem_linha = 'DEVOLUCAO'
+                                 THEN ABS(ve.valor_nf) ELSE 0 END), 0) AS devolucoes,
+               COALESCE(SUM(ve.soma_caixas), 0)       AS caixas,
+               COALESCE(SUM(ve.soma_litros), 0)       AS litros,
+               COUNT(DISTINCT ve.numero_nf)           AS notas
+        FROM vw_vendas_liquidas ve
+        LEFT JOIN vendedores v ON v.id = ve.vendedor_id
+        ${baseWhere}
+        GROUP BY ve.customer_number, vendedor
+        HAVING valor <> 0
+        ORDER BY vendedor, valor DESC
+      `, baseParams),
+
+      // ── CONSOLIDADO por VENDEDOR ───────────────────────────
+      query(`
+        SELECT ${vendedorExpr}                        AS vendedor,
+               COUNT(DISTINCT CASE WHEN ve.origem_linha = 'VENDA'
+                                   THEN ve.customer_number END) AS clientes,
+               COALESCE(SUM(ve.valor_nf), 0)          AS valor,
+               COALESCE(SUM(CASE WHEN ve.origem_linha = 'DEVOLUCAO'
+                                 THEN ABS(ve.valor_nf) ELSE 0 END), 0) AS devolucoes,
+               COALESCE(SUM(ve.soma_caixas), 0)       AS caixas,
+               COALESCE(SUM(ve.soma_litros), 0)       AS litros,
+               COUNT(DISTINCT ve.numero_nf)           AS notas
+        FROM vw_vendas_liquidas ve
+        LEFT JOIN vendedores v ON v.id = ve.vendedor_id
+        ${baseWhere}
+        GROUP BY vendedor
+        ORDER BY valor DESC
+      `, baseParams),
     ]);
 
     // ── LÍQUIDO = BRUTO − DEVOLUÇÕES ──────────────────────────────────────
@@ -933,6 +1011,44 @@ router.get('/relatorio', authMiddleware, ownDataOnly, async (req, res) => {
       valor_bruto:      num(c.valor_bruto),
       valor_devolucoes: num(c.valor_devolucoes),
     }));
+
+    // ── Consolidado: cliente×vendedor + total por vendedor ─────────────
+    // O total do vendedor volta também colado em cada linha de cliente
+    // (`valor_vendedor`) para o Excel não precisar de PROCV, e já com a
+    // participação do cliente dentro da carteira daquele vendedor.
+    const consVendedores = consVendedoresQ.rows.map((r: any) => ({
+      vendedor:   String(r.vendedor ?? 'Sem vendedor'),
+      clientes:   num(r.clientes),
+      valor:      num(r.valor),
+      devolucoes: num(r.devolucoes),
+      caixas:     num(r.caixas),
+      litros:     num(r.litros),
+      notas:      num(r.notas),
+    }));
+    const totalVendedorMap = new Map(consVendedores.map(v => [v.vendedor, v.valor]));
+
+    const consClientes = consClientesQ.rows.map((r: any) => {
+      const vendedor = String(r.vendedor ?? 'Sem vendedor');
+      const valor    = num(r.valor);
+      const totalVen = num(totalVendedorMap.get(vendedor));
+      return {
+        sold:        r.sold,
+        cliente:     String(r.cliente ?? '—'),
+        vendedor,
+        canal:       r.canal ?? null,
+        segmentacao: r.segmentacao ?? null,
+        city:        r.city ?? null,
+        valor,
+        devolucoes:  num(r.devolucoes),
+        caixas:      num(r.caixas),
+        litros:      num(r.litros),
+        notas:       num(r.notas),
+        valor_vendedor: totalVen,
+        // Participação do cliente na carteira do vendedor. `null` quando a
+        // carteira fecha em zero — dividir por zero não vira 0%, vira nada.
+        pct_do_vendedor: totalVen !== 0 ? (valor / totalVen) * 100 : null,
+      };
+    });
 
     const mensalMap  = new Map(mensalQ.rows.map((r: any) => [num(r.mes_numero), r]));
     const rupturaMap = new Map(rupturaQ.rows.map((r: any) => [num(r.mes_numero), r]));
@@ -996,6 +1112,10 @@ router.get('/relatorio', authMiddleware, ownDataOnly, async (req, res) => {
       },
       top_clientes:     rankingClientes.slice(0, topN),
       ranking_clientes: rankingClientes,
+      consolidado: {
+        clientes:   consClientes,
+        vendedores: consVendedores,
+      },
       evolucao,
       transacoes: {
         total:    totalTransacoes,
