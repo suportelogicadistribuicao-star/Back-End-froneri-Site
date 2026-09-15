@@ -1,7 +1,7 @@
 // ─── rupturaRoutes.js ─────────────────────────────────────────────────────────
 import express from 'express';
 import { query } from '../config/database';
-import { authMiddleware, ownDataOnly } from '../middleware/auth';
+import { authMiddleware, ownDataOnly, requireRole } from '../middleware/auth';
 
 const rupturaRouter = express.Router();
 
@@ -105,6 +105,10 @@ rupturaRouter.put('/:id', authMiddleware, async (req, res) => {
 // ─── roteirizacaoRoutes.js ────────────────────────────────────────────────────
 const rotRouter = express.Router();
 
+// Montar/alterar rota é do comercial (gerente) e do admin. Vendedor só consulta
+// a própria rota — sem este guard, qualquer token logado removia clientes.
+const podeEditarRota = requireRole('admin', 'gerente');
+
 rotRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
     try {
         const {
@@ -202,7 +206,7 @@ rotRouter.get('/exportar/:vendedorId', authMiddleware, async (req, res) => {
     }
 });
 
-rotRouter.post('/', authMiddleware, async (req, res) => {
+rotRouter.post('/', authMiddleware, podeEditarRota, async (req, res) => {
     try {
         const { customer_number, codigo_vendedor, dia_semana, frequencia } = req.body;
 
@@ -238,7 +242,7 @@ rotRouter.post('/', authMiddleware, async (req, res) => {
     }
 });
 
-rotRouter.put('/:id', authMiddleware, async (req, res) => {
+rotRouter.put('/:id', authMiddleware, podeEditarRota, async (req, res) => {
     try {
         const id = Number(req.params.id);
         if (!Number.isFinite(id)) return res.status(400).json({ erro: 'ID inválido.' });
@@ -280,7 +284,7 @@ rotRouter.put('/:id', authMiddleware, async (req, res) => {
 // senão o Express casa '/cliente/...' com o parâmetro :id.
 
 // Remove um cliente de TODAS as rotas ativas de um vendedor específico.
-rotRouter.delete('/cliente/:customerNumber/vendedor/:codigoVendedor', authMiddleware, async (req, res) => {
+rotRouter.delete('/cliente/:customerNumber/vendedor/:codigoVendedor', authMiddleware, podeEditarRota, async (req, res) => {
     try {
         const customerNumber = Number(req.params.customerNumber);
         if (!Number.isFinite(customerNumber) || customerNumber <= 0) {
@@ -313,7 +317,7 @@ rotRouter.delete('/cliente/:customerNumber/vendedor/:codigoVendedor', authMiddle
 });
 
 // Remove um cliente de TODAS as rotas ativas, independente do vendedor.
-rotRouter.delete('/cliente/:customerNumber', authMiddleware, async (req, res) => {
+rotRouter.delete('/cliente/:customerNumber', authMiddleware, podeEditarRota, async (req, res) => {
     try {
         const customerNumber = Number(req.params.customerNumber);
         if (!Number.isFinite(customerNumber) || customerNumber <= 0) {
@@ -337,7 +341,7 @@ rotRouter.delete('/cliente/:customerNumber', authMiddleware, async (req, res) =>
 });
 
 // Remove UMA roteirização específica pelo id.
-rotRouter.delete('/:id', authMiddleware, async (req, res) => {
+rotRouter.delete('/:id', authMiddleware, podeEditarRota, async (req, res) => {
     try {
         const id = Number(req.params.id);
         if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ erro: 'ID inválido.' });
