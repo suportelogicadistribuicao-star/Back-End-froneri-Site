@@ -355,6 +355,17 @@ router.get('/dashboard', authMiddleware, ownDataOnly, async (req, res) => {
 // GET /vendas — transações paginadas. Lê vw_vendas_liquidas para que a soma
 // das linhas exibidas bata com o KPI do dashboard (devolução vem negativa).
 // incluir_devolucoes=false volta ao comportamento antigo (só VENDA).
+//
+// [v10] tipo=bonificacao — troca a FONTE para vw_vendas_nao_faturaveis, a
+// única view que enxerga 'AMOSTRA GRATIS'. Sem isso a bonificação é invisível
+// na tela: /dashboard e /relatorio leem vw_vendas_liquidas/validas, que só
+// contêm VENDA e DEVOLUCAO.
+//
+// Só esta rota ficou ciente do tipo — de propósito. Bonificação é ~3% do
+// volume (≈300 linhas/mês contra ≈5k de vendas), então o front baixa o
+// período inteiro com export=true e agrega no cliente, reusando o caminho que
+// já existe para busca/segmentação. Espelhar `tipo` no /dashboard custaria
+// seis queries paralelas e uma série de 6 meses que ninguém pediu.
 // ─────────────────────────────────────────────────────────────────────────────
 router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
   try {
@@ -384,6 +395,13 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
     const isExport    = String(req.query.export ?? '') === 'true';
     const incluirDev  = String(req.query.incluir_devolucoes ?? 'true') !== 'false';
 
+    // [v10] Whitelist de tipo. Qualquer valor fora de 'bonificacao' cai em
+    // 'venda' — o default preserva o contrato de quem já chama a rota sem o
+    // parâmetro. Não existe 'ambos': bonificação tem valor_nf = 0 em 100% das
+    // linhas, então misturar as duas fontes só diluiria ticket médio e
+    // caixas/cliente sem acrescentar informação nenhuma.
+    const isBonif = String(req.query.tipo ?? 'venda') === 'bonificacao';
+
     // vendedor_id da query precisa ser escalar numérico — repetir o parâmetro
     // na URL chega como array e viraria SQL inválido.
     const vendedorQuery = req.query.vendedor_id !== undefined && req.query.vendedor_id !== ''
@@ -398,11 +416,28 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
     const offset = isExport ? 0 : (page - 1) * limit;
 
     // Whitelist de view — nunca interpolar entrada do usuário.
-    const fonte = incluirDev ? 'vw_vendas_liquidas' : 'vw_vendas_validas';
-    const origemCol = incluirDev ? `ve.origem_linha` : `'VENDA' AS origem_linha`;
+    const fonte = isBonif
+      ? 'vw_vendas_nao_faturaveis'
+      : (incluirDev ? 'vw_vendas_liquidas' : 'vw_vendas_validas');
+
+    // vw_vendas_nao_faturaveis é mais estreita que as views de venda: não tem
+    // `origem_linha` nem `subcategoria`. Projetamos constantes para as duas
+    // para que a LINHA devolvida ao front tenha sempre o mesmo formato,
+    // independente do tipo — o mesmo recurso que `incluir_devolucoes` já usa.
+    const origemCol = isBonif
+      ? `'BONIFICACAO' AS origem_linha`
+      : (incluirDev ? `ve.origem_linha` : `'VENDA' AS origem_linha`);
+    const subcatCol = isBonif ? `NULL AS subcategoria` : `ve.subcategoria`;
+
+    // Mesmo critério do /relatorio: filtramos 'AMOSTRA GRATIS' explicitamente
+    // em vez de aceitar a view inteira, que também abriga o catch-all 'OUTRO'
+    // do normStatusVenda. Um status novo da Froneri não deve virar bonificação
+    // sem alguém decidir isso.
+    const tipoSql = isBonif ? `AND ve.status_venda = 'AMOSTRA GRATIS'` : '';
 
     const whereSql = `
       WHERE 1 = 1
+        ${tipoSql}
         AND (? IS NULL OR ve.mes_numero          = ?)
         AND (? IS NULL OR ve.mes_numero         >= ?)
         AND (? IS NULL OR ve.mes_numero         <= ?)
@@ -435,7 +470,7 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
         SELECT
           COALESCE(SUM(ve.valor_nf), 0)    AS valor_liquido,
           COALESCE(SUM(ve.soma_caixas), 0) AS caixas_liquidas
-          ${incluirDev ? `,
+          ${incluirDev && !isBonif ? `,
           COALESCE(SUM(CASE WHEN ve.origem_linha = 'VENDA'
                             THEN ve.valor_nf ELSE 0 END), 0)      AS valor_bruto,
           COALESCE(SUM(CASE WHEN ve.origem_linha = 'DEVOLUCAO'
@@ -453,7 +488,7 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
       query(`
         SELECT
           ve.customer_number, ve.customer_name, ve.numero_nf, ve.data_faturamento,
-          ve.descricao_produto, ve.categoria, ve.subcategoria, ve.categoria_total_sku,
+          ve.descricao_produto, ve.categoria, ${subcatCol}, ve.categoria_total_sku,
           ve.soma_caixas, ve.soma_litros, ve.valor_nf, ve.status_venda,
           ${origemCol},
           ve.canal_cliente, ve.segmentacao_cliente, ve.city,
@@ -470,6 +505,9 @@ router.get('/', authMiddleware, ownDataOnly, async (req, res) => {
       total:  Number(totalQ.rows[0].count),
       pagina: page,
       limite: limit,
+      // Ecoado para o front conseguir distinguir uma resposta de bonificação de
+      // uma de vendas que por acaso veio vazia — os dois casos rendem R$ 0,00.
+      tipo:   isBonif ? 'bonificacao' : 'venda',
       totais: {
         valor_liquido:    num(totaisQ.rows[0]?.valor_liquido),
         caixas_liquidas:  num(totaisQ.rows[0]?.caixas_liquidas),
@@ -783,6 +821,7 @@ router.get('/relatorio', authMiddleware, ownDataOnly, async (req, res) => {
     const [
       kpisQ, devQ, resumoQ, clientesQ, mensalQ, rupturaQ, transTotalQ, transQ,
       consClientesQ, consVendedoresQ, consClientesMesQ, consVendedoresMesQ,
+      bonifVendedoresQ,
     ] = await Promise.all([
       // ── BRUTO — só VENDA ────────────────────────────────────────────────
       query(`
@@ -1021,6 +1060,35 @@ router.get('/relatorio', authMiddleware, ownDataOnly, async (req, res) => {
         GROUP BY ve.mes_numero, vendedor
         ORDER BY ve.mes_numero, valor DESC
       `, baseParams),
+
+      // ── [v9] BONIFICAÇÃO por VENDEDOR ───────────────────────────────
+      // A bonificação da Froneri chega na Base Vendas com Status "Amostra
+      // Grátis" e é normalizada para 'AMOSTRA GRATIS' no import. Ela NÃO
+      // entra em vw_vendas_validas/liquidas (que só enxergam VENDA e
+      // DEVOLUCAO), por isso nunca apareceu neste relatório.
+      //
+      // Só VOLUME: bonificação é mercadoria entregue sem cobrança, então
+      // valor_nf e valor_vbc são 0 em 100% das linhas. Somar R$ aqui
+      // devolveria zero e só geraria confusão na planilha.
+      //
+      // Filtramos 'AMOSTRA GRATIS' em vez de usar vw_vendas_nao_faturaveis
+      // direto: aquela view também traz 'OUTRO' — o catch-all do
+      // normStatusVenda para status que a Froneri ainda não usou. Se um
+      // status novo aparecer amanhã, ele NÃO deve virar bonificação sem
+      // alguém decidir isso.
+      query(`
+        SELECT ${vendedorExpr}                        AS vendedor,
+               COALESCE(SUM(ve.soma_caixas), 0)       AS caixas,
+               COALESCE(SUM(ve.soma_litros), 0)       AS litros,
+               COUNT(DISTINCT ve.numero_nf)           AS notas,
+               COUNT(DISTINCT ve.customer_number)     AS clientes
+        FROM vw_vendas_nao_faturaveis ve
+        LEFT JOIN vendedores v ON v.id = ve.vendedor_id
+        ${baseWhere}
+          AND ve.status_venda = 'AMOSTRA GRATIS'
+        GROUP BY vendedor
+        ORDER BY caixas DESC
+      `, baseParams),
     ]);
 
     // ── LÍQUIDO = BRUTO − DEVOLUÇÕES ──────────────────────────────────────
@@ -1093,7 +1161,40 @@ router.get('/relatorio', authMiddleware, ownDataOnly, async (req, res) => {
       };
     };
 
-    const consVendedores = consVendedoresQ.rows.map(linhaVendedor);
+    // ── [v9] Bonificação por vendedor ───────────────────────────────────
+    // Indexada por nome para colar em cada linha do consolidado. O nome é a
+    // mesma expressão (`vendedorExpr`) nas duas queries, então as chaves
+    // batem — inclusive o bucket 'Sem vendedor' das linhas sem vendedor_id.
+    const bonifMap = new Map<string, any>(
+      bonifVendedoresQ.rows.map((r: any) => [String(r.vendedor ?? 'Sem vendedor'), r]),
+    );
+
+    // Quanto do volume que o vendedor movimentou foi dado em bonificação.
+    // `caixasVendidas` chega LÍQUIDO (vendas − devoluções, via
+    // vw_vendas_liquidas), então pode ser 0 ou até negativo num período em
+    // que o vendedor devolveu mais do que vendeu.
+    //
+    // TODO(você): definir o denominador e o comportamento nos casos-limite.
+    //   Retorne `null` (não 0) quando o percentual for indefinido — é a
+    //   convenção já usada em `pct_do_vendedor` e `ruptura_pct` aqui neste
+    //   arquivo, e o front distingue "sem base para calcular" de "zero".
+    const pctBonificacao = (caixasBonificadas: number, caixasVendidas: number): number | null => {
+      return null;
+    };
+
+    const consVendedores = consVendedoresQ.rows.map((r: any) => {
+      const base = linhaVendedor(r);
+      const b = bonifMap.get(base.vendedor);
+      const bonifCaixas = num(b?.caixas);
+      return {
+        ...base,
+        bonificacao_caixas:   bonifCaixas,
+        bonificacao_litros:   num(b?.litros),
+        bonificacao_notas:    num(b?.notas),
+        bonificacao_clientes: num(b?.clientes),
+        pct_bonificacao:      pctBonificacao(bonifCaixas, base.caixas),
+      };
+    });
     const totalVendedorMap = new Map(consVendedores.map(v => [v.vendedor, v.valor]));
     const consClientes = consClientesQ.rows.map((r: any) =>
       linhaCliente(r, num(totalVendedorMap.get(String(r.vendedor ?? 'Sem vendedor')))));
