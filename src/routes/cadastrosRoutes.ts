@@ -7,7 +7,7 @@
 //                                      'concluido' cria o cliente em `clientes`
 //                                      SEM SOLD — quem emite o SOLD é a Froneri,
 //                                      e a importação o preenche depois
-//   DELETE /api/cadastros/:id        → exclui (vendedor: só a própria, pendente/em_analise)
+//   DELETE /api/cadastros/:id        → exclui (admin/gerente)
 //   GET    /api/cadastros/:id/historico → timeline de alterações da solicitação
 //                                      (vendedor: só as dele; gestão: todas)
 //   GET    /api/cadastros/estatisticas → contadores por status: consolidado,
@@ -990,20 +990,12 @@ router.get('/:id/historico', authMiddleware, ownDataOnly, async (req, res) => {
 });
 
 // ── DELETE /api/cadastros/:id ────────────────────────────────────────────────
-router.delete('/:id', authMiddleware, async (req, res) => {
+// Só a gestão exclui: vendedor apenas abre solicitações (POST) — nem a própria
+// pendente ele apaga, assim como não edita nem muda status.
+router.delete('/:id', authMiddleware, requireRole('admin', 'gerente'), async (req, res) => {
     try {
         const existente = await buscarCadastro(req.params.id);
         if (!existente) return res.status(404).json({ erro: 'Solicitação de cadastro não encontrada.' });
-
-        const ehGestor = ['admin', 'gerente'].includes(String(req.usuario?.role || ''));
-        if (!ehGestor) {
-            if (!req.usuario?.vendedor_id || String(existente.vendedor_id) !== String(req.usuario.vendedor_id)) {
-                return res.status(403).json({ erro: 'Você só pode excluir as próprias solicitações.' });
-            }
-            if (!['pendente', 'em_analise'].includes(existente.status)) {
-                return res.status(403).json({ erro: 'Solicitação já analisada — apenas a gestão pode excluí-la.' });
-            }
-        }
 
         await query('DELETE FROM cadastros WHERE id = $1', [existente.id]);
         // Depois do DELETE no banco: se a remoção no B2 falhar, sobra só um
