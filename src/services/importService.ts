@@ -406,7 +406,12 @@ async function adotarClientesSemSold(rows: Record<string, unknown>[]): Promise<n
                 await client.query('UPDATE clientes SET customer_number = $1 WHERE id = $2', [sold, pendente.id]);
                 // Espelha o SOLD na solicitação de origem — é o que a tela de
                 // cadastros mostra para a gestão saber que a Froneri já cadastrou.
-                await client.query('UPDATE cadastros SET customer_number = $1 WHERE cliente_id = $2', [sold, pendente.id]);
+                // `cadastros` não guarda o id do cliente (a tabela segue a
+                // planilha): o vínculo é o mesmo CNPJ que acabou de casar.
+                await client.query(
+                    'UPDATE cadastros SET customer_number = $1 WHERE cnpj = $2 AND customer_number IS NULL',
+                    [sold, cnpj]
+                );
             });
             adotados++;
             console.log(`[import/adocao] SOLD ${sold} atribuído a "${pendente.customer_name}" (CNPJ ${cnpj})`);

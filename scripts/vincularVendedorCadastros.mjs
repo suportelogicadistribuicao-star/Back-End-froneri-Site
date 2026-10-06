@@ -56,7 +56,9 @@ async function main() {
     try {
         const [vendedores] = await conn.query('SELECT id, nome FROM vendedores WHERE ativo = TRUE');
         const [linhas] = await conn.query(
-            'SELECT id, vendedor_territorio FROM cadastros WHERE vendedor_id IS NULL',
+            // Desde a recriação da tabela pela planilha (06/10/2026) o nome do
+            // território está em `nome_vendedor`.
+            'SELECT id, nome_vendedor AS vendedor_territorio FROM cadastros WHERE vendedor_id IS NULL',
         );
 
         const alteracoes = [];

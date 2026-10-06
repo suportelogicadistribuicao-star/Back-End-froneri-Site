@@ -36,8 +36,9 @@ export interface Autor {
 }
 
 // ─── Status terminais ────────────────────────────────────────────────────────
-// Encerram a solicitação e carimbam `finalizado_em`, que por sua vez move a
-// competência do registro (ver `data_referencia` no schema). `recusado` entra
+// Encerram a solicitação e carimbam `data_resolucao` (exposta como
+// `finalizado_em`), que por sua vez move a competência do registro (ver
+// `data_referencia` em CADASTROS_APP, no cadastrosRoutes). `recusado` entra
 // aqui de propósito: uma recusa em 10/11 também deixou de ser trabalho de
 // outubro. Os demais status (pendente, em_analise, em_andamento, reanalise,
 // reativacao) são "em andamento" e limpam o carimbo se a solicitação voltar.
