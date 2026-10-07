@@ -55,6 +55,7 @@ rupturaRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
                     r.mes_numero, r.ano,
                     c.customer_name, c.city, c.canal_cliente, c.segmentacao_cliente,
                     c.telefone, c.nova_rup, c.cnpj,
+                    c.logradouro, c.bairro, c.postal_code,
                     v.nome AS vendedor_nome, v.setor
                 FROM ruptura r
                 JOIN clientes c ON c.customer_number = r.customer_number
@@ -145,9 +146,13 @@ rotRouter.get('/', authMiddleware, ownDataOnly, async (req, res) => {
         const rows = await query(`
             SELECT
                 rot.id, rot.customer_number, rot.dia_semana, rot.frequencia, rot.sequencia,
-                rot.visitas_semana, rot.bairro, rot.cidade,
+                rot.visitas_semana,
+                -- Endereço vem do cadastro de clientes (planilha Froneri); o que
+                -- foi digitado na rota só entra quando o cadastro não tem o dado.
+                COALESCE(NULLIF(c.bairro, ''), rot.bairro) AS bairro,
+                COALESCE(NULLIF(c.city, ''),   rot.cidade) AS cidade,
                 c.customer_name, c.cnpj, c.canal_cliente, c.segmentacao_cliente,
-                c.telefone, c.nova_rup, c.logradouro,
+                c.telefone, c.nova_rup, c.logradouro, c.postal_code,
                 v.nome AS vendedor_nome, v.setor, v.codigo_vendedor
             FROM roteirizacao rot
             JOIN clientes c ON c.customer_number = rot.customer_number

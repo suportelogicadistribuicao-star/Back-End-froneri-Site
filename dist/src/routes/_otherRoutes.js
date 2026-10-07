@@ -80,6 +80,7 @@ rupturaRouter.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, asyn
                     r.mes_numero, r.ano,
                     c.customer_name, c.city, c.canal_cliente, c.segmentacao_cliente,
                     c.telefone, c.nova_rup, c.cnpj,
+                    c.logradouro, c.bairro, c.postal_code,
                     v.nome AS vendedor_nome, v.setor
                 FROM ruptura r
                 JOIN clientes c ON c.customer_number = r.customer_number
@@ -133,6 +134,7 @@ rupturaRouter.put("/:id", import_auth.authMiddleware, async (req, res) => {
   }
 });
 const rotRouter = import_express.default.Router();
+const podeEditarRota = (0, import_auth.requireRole)("admin", "gerente");
 rotRouter.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (req, res) => {
   try {
     const {
@@ -171,9 +173,13 @@ rotRouter.get("/", import_auth.authMiddleware, import_auth.ownDataOnly, async (r
     const rows = await (0, import_database.query)(`
             SELECT
                 rot.id, rot.customer_number, rot.dia_semana, rot.frequencia, rot.sequencia,
-                rot.visitas_semana, rot.bairro, rot.cidade,
+                rot.visitas_semana,
+                -- Endere\xE7o vem do cadastro de clientes (planilha Froneri); o que
+                -- foi digitado na rota s\xF3 entra quando o cadastro n\xE3o tem o dado.
+                COALESCE(NULLIF(c.bairro, ''), rot.bairro) AS bairro,
+                COALESCE(NULLIF(c.city, ''),   rot.cidade) AS cidade,
                 c.customer_name, c.cnpj, c.canal_cliente, c.segmentacao_cliente,
-                c.telefone, c.nova_rup, c.logradouro,
+                c.telefone, c.nova_rup, c.logradouro, c.postal_code,
                 v.nome AS vendedor_nome, v.setor, v.codigo_vendedor
             FROM roteirizacao rot
             JOIN clientes c ON c.customer_number = rot.customer_number
@@ -222,7 +228,7 @@ rotRouter.get("/exportar/:vendedorId", import_auth.authMiddleware, async (req, r
     res.status(500).json({ erro: "Erro ao exportar roteiro." });
   }
 });
-rotRouter.post("/", import_auth.authMiddleware, async (req, res) => {
+rotRouter.post("/", import_auth.authMiddleware, podeEditarRota, async (req, res) => {
   try {
     const { customer_number, codigo_vendedor, dia_semana, frequencia } = req.body;
     if (!customer_number || !codigo_vendedor || !dia_semana || !frequencia) {
@@ -250,7 +256,7 @@ rotRouter.post("/", import_auth.authMiddleware, async (req, res) => {
     res.status(500).json({ erro: "Erro ao criar roteiriza\xE7\xE3o." });
   }
 });
-rotRouter.put("/:id", import_auth.authMiddleware, async (req, res) => {
+rotRouter.put("/:id", import_auth.authMiddleware, podeEditarRota, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id)) return res.status(400).json({ erro: "ID inv\xE1lido." });
@@ -283,7 +289,7 @@ rotRouter.put("/:id", import_auth.authMiddleware, async (req, res) => {
     res.status(500).json({ erro: "Erro ao atualizar roteiriza\xE7\xE3o." });
   }
 });
-rotRouter.delete("/cliente/:customerNumber/vendedor/:codigoVendedor", import_auth.authMiddleware, async (req, res) => {
+rotRouter.delete("/cliente/:customerNumber/vendedor/:codigoVendedor", import_auth.authMiddleware, podeEditarRota, async (req, res) => {
   try {
     const customerNumber = Number(req.params.customerNumber);
     if (!Number.isFinite(customerNumber) || customerNumber <= 0) {
@@ -310,7 +316,7 @@ rotRouter.delete("/cliente/:customerNumber/vendedor/:codigoVendedor", import_aut
     res.status(500).json({ erro: "Erro ao remover cliente das rotas." });
   }
 });
-rotRouter.delete("/cliente/:customerNumber", import_auth.authMiddleware, async (req, res) => {
+rotRouter.delete("/cliente/:customerNumber", import_auth.authMiddleware, podeEditarRota, async (req, res) => {
   try {
     const customerNumber = Number(req.params.customerNumber);
     if (!Number.isFinite(customerNumber) || customerNumber <= 0) {
@@ -329,7 +335,7 @@ rotRouter.delete("/cliente/:customerNumber", import_auth.authMiddleware, async (
     res.status(500).json({ erro: "Erro ao remover cliente das rotas." });
   }
 });
-rotRouter.delete("/:id", import_auth.authMiddleware, async (req, res) => {
+rotRouter.delete("/:id", import_auth.authMiddleware, podeEditarRota, async (req, res) => {
   try {
     const id = Number(req.params.id);
     if (!Number.isFinite(id) || id <= 0) return res.status(400).json({ erro: "ID inv\xE1lido." });
